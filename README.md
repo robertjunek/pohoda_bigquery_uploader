@@ -4,10 +4,10 @@ Skript pro automatickou synchronizaci dat z MS SQL (Pohoda) do Google BigQuery.
 
 ## 🚀 Rychlý start
 
-### 1. Instalace závislostí (již hotovo ✅)
+### 1. Instalace závislostí
 ```bash
 source .venv/bin/activate
-pip install -r requirements.txt  # Již nainstalováno
+pip install -r requirements.txt 
 ```
 
 ### 2. Konfigurace
