@@ -1,6 +1,6 @@
 # Credentials a konfigurace
 config.json
-veverka.json
+pohoda_bigquery_uploader.json
 
 # Logs
 *.log

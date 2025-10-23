@@ -32,8 +32,8 @@ Automatická synchronizace dat z MS SQL (Pohoda) do Google BigQuery s kompletní
 
 ```bash
 # Klonování repozitáře
-git clone https://github.com/tvuj-username/apoteka-veverka.git
-cd apoteka-veverka
+git clone https://github.com/robertjunek/pohoda_bigquery_uploader.git
+cd pohoda_bigquery_uploader
 
 # Vytvoření virtual environment
 python -m venv .venv
@@ -296,7 +296,7 @@ Tento projekt je licencován pod MIT licencí - viz [LICENSE](LICENSE) soubor.
 
 **Robert**
 
-- GitHub: [@tvuj-username](https://github.com/tvuj-username)
+- GitHub: [@robertjunek](https://github.com/robertjunek)
 
 ---
 
@@ -311,7 +311,7 @@ Tento projekt je licencován pod MIT licencí - viz [LICENSE](LICENSE) soubor.
 
 ## 📞 Podpora
 
-Máš problém? Otevři [issue](https://github.com/tvuj-username/apoteka-veverka/issues) na GitHubu.
+Máš problém? Otevři [issue](https://github.com/robertjunek/pohoda_bigquery_uploader/issues) na GitHubu.
 
 ---
 

@@ -1,8 +1,8 @@
-apoteka_veverka/
+pohoda_bigquery_uploader/
 │
 ├── 📋 KONFIGURACE
 │   ├── config.json                     # MS SQL, BigQuery, Sentry konfigurace
-│   ├── veverka.json                    # Google Cloud credentials
+│   ├── pohoda_bigquery_uploader.json                    # Google Cloud credentials
 │   └── requirements.txt                # Python závislosti
 │
 ├── 🔍 SQL DOTAZY
@@ -107,7 +107,7 @@ WORKFLOW
 
 5. NASTAVENÍ CRON (pro automatiku)
    ├─ crontab -e
-   └─ Přidej: 0 2 * * * cd /home/robert/projekty/apoteka_veverka && .venv/bin/python sync_pohoda_to_bigquery.py >> cron.log 2>&1
+   └─ Přidej: 0 2 * * * cd /home/robert/projekty/pohoda_bigquery_uploader && .venv/bin/python sync_pohoda_to_bigquery.py >> cron.log 2>&1
 
 6. MONITORING
    ├─ make status         # Stav poslední sync
@@ -121,7 +121,7 @@ VELIKOSTI SOUBORŮ
 
 sync_pohoda_to_bigquery.py    16 KB   (hlavní skript)
 config.json                   ~1 KB   (konfigurace)
-veverka.json                  ~2 KB   (credentials)
+pohoda_bigquery_uploader.json                  ~2 KB   (credentials)
 test_connections.py           ~5 KB   (testy)
 check_status.py               ~4 KB   (monitoring)
 README.md + dokumentace       ~15 KB  (dokumentace)
@@ -148,13 +148,13 @@ BEZPEČNOST
 ═══════════════════════════════════════════════════════════════
 
 ✓ config.json v .gitignore (obsahuje hesla)
-✓ veverka.json v .gitignore (Google credentials)
+✓ pohoda_bigquery_uploader.json v .gitignore (Google credentials)
 ✓ sync.log* v .gitignore (může obsahovat citlivá data)
 ✓ Connection timeout (30s)
 ✓ Error tracking přes Sentry
 ✓ Rotační logy (max 10 MB × 5)
 
-DŮLEŽITÉ: Nikdy necommituj config.json a veverka.json do gitu!
+DŮLEŽITÉ: Nikdy necommituj config.json a pohoda_bigquery_uploader.json do gitu!
 
 
 ═══════════════════════════════════════════════════════════════

@@ -32,7 +32,7 @@ python test_connections.py
    - Doplnit přihlašovací údaje k MS SQL serveru
    - Doplnit Sentry DSN (pokud chceš používat error tracking)
 
-2. **Zkontrolovat `veverka.json`:**
+2. **Zkontrolovat `pohoda_bigquery_uploader.json`:**
    - Měl by obsahovat Google Cloud credentials (už je připraven)
 
 ## Použití
@@ -51,12 +51,12 @@ crontab -e
 
 Přidej řádek (např. každý den ve 2:00):
 ```cron
-0 2 * * * cd /home/robert/projekty/apoteka_veverka && .venv/bin/python sync_pohoda_to_bigquery.py >> cron.log 2>&1
+0 2 * * * cd /home/robert/projekty/pohoda_bigquery_uploader && .venv/bin/python sync_pohoda_to_bigquery.py >> cron.log 2>&1
 ```
 
 Nebo každých 6 hodin:
 ```cron
-0 */6 * * * cd /home/robert/projekty/apoteka_veverka && .venv/bin/python sync_pohoda_to_bigquery.py >> cron.log 2>&1
+0 */6 * * * cd /home/robert/projekty/pohoda_bigquery_uploader && .venv/bin/python sync_pohoda_to_bigquery.py >> cron.log 2>&1
 ```
 
 ## Struktura projektu
@@ -66,7 +66,7 @@ Nebo každých 6 hodin:
 ├── .pohoda_dokumentace
 │   ├── dokumentace.zip            # Oficiální dokumentace Pohody
 ├── config.json                    # Konfigurace (MS SQL, BigQuery, Sentry)
-├── veverka.json                   # Google Cloud credentials
+├── pohoda_bigquery_uploader.json                   # Google Cloud credentials
 ├── sync_pohoda_to_bigquery.py     # Hlavní skript
 ├── requirements.txt               # Python závislosti
 ├── FA.sql                         # SQL dotaz pro faktury
@@ -107,7 +107,7 @@ sudo ACCEPT_EULA=Y apt-get install -y msodbcsql17
 - Zkontroluj firewall pravidla
 
 ### BigQuery chyba
-- Ověř, že `veverka.json` má správná oprávnění
+- Ověř, že json pro BigQuery má správná oprávnění
 - Service account musí mít role: BigQuery Data Editor, BigQuery Job User
 
 ## Monitorování

@@ -22,13 +22,13 @@ Tento projekt má připravenou dokumentaci pro GitHub Pages.
 
 4. **Otevři dokumentaci:**
    ```
-   https://tvuj-username.github.io/apoteka-veverka/
+   https://robertjunek.github.io/pohoda_bigquery_uploader/
    ```
 
 ## Struktura dokumentace
 
 ```
-apoteka_veverka/
+pohoda_bigquery_uploader/
 ├── _config.yml           # Jekyll konfigurace
 ├── index.md              # Hlavní stránka (README)
 └── docs/
@@ -58,7 +58,7 @@ Můžeš změnit v `_config.yml`:
 
 2. Nastav DNS:
    ```
-   docs  CNAME  tvuj-username.github.io
+   docs  CNAME  robertjunek.github.io
    ```
 
 3. V GitHub Settings → Pages nastav custom domain

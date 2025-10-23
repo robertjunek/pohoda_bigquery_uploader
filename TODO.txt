@@ -5,7 +5,7 @@
 ─────────────────
 ✓ sync_pohoda_to_bigquery.py  - Hlavní synchronizační skript
 ✓ config.json                  - Konfigurace (MS SQL, BigQuery, Sentry)
-✓ veverka.json                 - Google Cloud credentials (již existuje)
+✓ pohoda_bigquery_uploader.json                 - Google Cloud credentials (již existuje)
 ✓ requirements.txt             - Python závislosti
 
 📄 SQL DOTAZY (již existují)
@@ -79,7 +79,7 @@ crontab -e
 
 Přidej řádek (např. každý den ve 2:00):
 
-0 2 * * * cd /home/robert/projekty/apoteka_veverka && .venv/bin/python sync_pohoda_to_bigquery.py >> cron.log 2>&1
+0 2 * * * cd /home/robert/projekty/pohoda_bigquery_uploader && .venv/bin/python sync_pohoda_to_bigquery.py >> cron.log 2>&1
 
 
 📊 MONITORING
@@ -149,7 +149,7 @@ Jen chyby:
   sudo ACCEPT_EULA=Y apt-get install -y msodbcsql17
 
 ❌ BigQuery oprávnění chyba
-→ Service account (veverka.json) potřebuje role:
+→ Service account (pohoda_bigquery_uploader.json) potřebuje role:
   - BigQuery Data Editor
   - BigQuery Job User
 

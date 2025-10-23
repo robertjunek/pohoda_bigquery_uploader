@@ -16,7 +16,7 @@
                   │               │               │
                   ▼               ▼               ▼
          ┌────────────┐  ┌────────────┐  ┌────────────┐
-         │ config.json│  │veverka.json│  │  SQL files │
+         │ config.json│  │pohoda_bigquery_uploader.json│  │  SQL files │
          │            │  │            │  │  (4 ks)    │
          │ MS SQL     │  │ BigQuery   │  │            │
          │ credentials│  │ credentials│  │ FA.sql     │
@@ -65,7 +65,7 @@
 1. **Inicializace:**
    - Načte config.json (MS SQL credentials, batch size, atd.)
    - Připojí se k MS SQL serveru
-   - Připojí se k BigQuery (pomocí veverka.json)
+   - Připojí se k BigQuery (pomocí pohoda_bigquery_uploader.json)
    - Inicializuje Sentry error tracking
 
 2. **Získání connection info:**
@@ -107,7 +107,7 @@
 ## Bezpečnost
 
 - ✅ Credentials v config.json (gitignore)
-- ✅ Service account pro BigQuery (veverka.json)
+- ✅ Service account pro BigQuery (pohoda_bigquery_uploader.json)
 - ✅ Connection timeout (30s)
 - ✅ Error tracking přes Sentry
 - ✅ Rotační logy (max 10 MB × 5 souborů)

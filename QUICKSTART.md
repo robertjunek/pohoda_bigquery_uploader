@@ -34,7 +34,7 @@ crontab -e
 
 Přidej (např. každý den ve 2:00):
 ```cron
-0 2 * * * cd /home/robert/projekty/apoteka_veverka && .venv/bin/python sync_pohoda_to_bigquery.py >> cron.log 2>&1
+0 2 * * * cd /home/robert/projekty/pohoda_bigquery_uploader && .venv/bin/python sync_pohoda_to_bigquery.py >> cron.log 2>&1
 ```
 
 ## Co dělá skript?
@@ -89,7 +89,7 @@ sudo ACCEPT_EULA=Y apt-get install -y msodbcsql17
 ```
 
 ### BigQuery oprávnění
-Service account v `veverka.json` potřebuje role:
+Service account v `pohoda_bigquery_uploader.json` potřebuje role:
 - BigQuery Data Editor
 - BigQuery Job User
 

@@ -50,8 +50,8 @@ Stáhni a nainstaluj z [Microsoft Download Center](https://docs.microsoft.com/en
 ## Krok 1: Klonování repozitáře
 
 ```bash
-git clone https://github.com/tvuj-username/apoteka-veverka.git
-cd apoteka-veverka
+git clone https://github.com/robertjunek/pohoda_bigquery_uploader.git
+cd pohoda_bigquery_uploader
 ```
 
 ---
@@ -110,16 +110,16 @@ make install
    - BigQuery Data Editor
    - BigQuery Job User
 7. Vytvoř JSON klíč
-8. Ulož jako `veverka.json` (nebo jiný název)
+8. Ulož jako `pohoda_bigquery_uploader.json` (nebo jiný název)
 
 ### Umístění credentials
 
 ```bash
 # Zkopíruj credentials do projektu
-cp /path/to/downloaded/key.json veverka.json
+cp /path/to/downloaded/key.json pohoda_bigquery_uploader.json
 ```
 
-⚠️ **DŮLEŽITÉ:** Nikdy necommituj `veverka.json` do gitu!
+⚠️ **DŮLEŽITÉ:** Nikdy necommituj `pohoda_bigquery_uploader.json` do gitu!
 
 ---
 
@@ -145,7 +145,7 @@ Uprav `config.json`:
 {
   "mssql": {
     "server": "192.168.1.50",
-    "database": "veverka",
+    "database": "pohoda_bigquery_uploader",
     "username": "sa",
     "password": "tvoje_heslo",
     "driver": "ODBC Driver 18 for SQL Server",
@@ -155,7 +155,7 @@ Uprav `config.json`:
   "bigquery": {
     "project_id": "tvuj-projekt-id",
     "dataset": "pohoda",
-    "credentials_file": "veverka.json",
+    "credentials_file": "pohoda_bigquery_uploader.json",
     "location": "EU"
   },
   "sync": {
@@ -206,7 +206,7 @@ Test připojení k databázím
 ----------------------------------------------------------------------
 ✅ MS SQL připojení OK
    Server: 192.168.1.50
-   Database: veverka
+   Database: pohoda_bigquery_uploader
    Linked server: TEST1
    Pohoda database: StwPhHPA_02891042_202502
 
@@ -261,7 +261,7 @@ make test-sync
 crontab -e
 
 # Přidej řádek (každý den ve 2:00)
-0 2 * * * cd /home/robert/projekty/apoteka_veverka && .venv/bin/python sync_pohoda_to_bigquery.py >> cron.log 2>&1
+0 2 * * * cd /home/robert/projekty/pohoda_bigquery_uploader && .venv/bin/python sync_pohoda_to_bigquery.py >> cron.log 2>&1
 ```
 
 ### Task Scheduler (Windows)
@@ -272,7 +272,7 @@ crontab -e
 4. Action: Start a program
    - Program: `C:\path\to\.venv\Scripts\python.exe`
    - Arguments: `sync_pohoda_to_bigquery.py`
-   - Start in: `C:\path\to\apoteka_veverka`
+   - Start in: `C:\path\to\pohoda_bigquery_uploader`
 
 ---
 
@@ -315,7 +315,7 @@ chmod +x test_sync.sh
 ### BigQuery credentials chyba
 
 Zkontroluj:
-1. Cesta k `veverka.json` je správná
+1. Cesta k JSON s BigQuery credentials je správná
 2. Service account má správné role
 3. Projekt ID v config.json je správný
 
