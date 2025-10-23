@@ -1,0 +1,178 @@
+📦 KOMPLETNÍ SEZNAM SOUBORŮ
+════════════════════════════════════════════════════════════════
+
+📄 HLAVNÍ SOUBORY
+─────────────────
+✓ sync_pohoda_to_bigquery.py  - Hlavní synchronizační skript
+✓ config.json                  - Konfigurace (MS SQL, BigQuery, Sentry)
+✓ veverka.json                 - Google Cloud credentials (již existuje)
+✓ requirements.txt             - Python závislosti
+
+📄 SQL DOTAZY (již existují)
+─────────────────────────────
+✓ FA.sql                       - Faktury
+✓ PH.sql                       - Prodejky
+✓ SKPP.sql                     - Příjemky
+✓ SKPV.sql                     - Výdejky
+
+📄 POMOCNÉ SKRIPTY
+──────────────────
+✓ setup_config.py              - Interaktivní konfigurace
+✓ test_connections.py          - Test připojení k databázím
+✓ test_sync.sh                 - Testovací spuštění synchronizace
+✓ check_status.py              - Kontrola stavu poslední sync
+
+📄 DOKUMENTACE
+──────────────
+✓ README.md                    - Kompletní dokumentace
+✓ QUICKSTART.md                - Rychlý start
+✓ ARCHITECTURE.md              - Diagram architektury
+✓ crontab.example              - Příklady cron jobů
+
+📄 OSTATNÍ
+──────────
+✓ Makefile                     - Snadné ovládání (make help)
+✓ .gitignore                   - Git ignore (credentials atd.)
+
+
+🎯 CO DĚLAT TEĎ?
+════════════════════════════════════════════════════════════════
+
+KROK 1: Konfigurace
+───────────────────
+make config
+(nebo: python setup_config.py)
+
+Zadej:
+- MS SQL server adresu
+- Database (obvykle "master")
+- Username & password
+- Sentry DSN (volitelné, můžeš nechat prázdné)
+
+
+KROK 2: Test připojení
+───────────────────────
+make test-conn
+(nebo: python test_connections.py)
+
+Ověří:
+- ✓ MS SQL připojení
+- ✓ Přístup k tabulce companies
+- ✓ BigQuery připojení
+- ✓ Existenci SQL souborů
+
+
+KROK 3: Testovací synchronizace
+────────────────────────────────
+make test-sync
+(nebo: ./test_sync.sh)
+
+Provede:
+- Připojení k oběma databázím
+- Stažení dat z Pohody
+- Nahrání do BigQuery
+
+
+KROK 4: Nastavení automatického spouštění
+──────────────────────────────────────────
+crontab -e
+
+Přidej řádek (např. každý den ve 2:00):
+
+0 2 * * * cd /home/robert/projekty/apoteka_veverka && .venv/bin/python sync_pohoda_to_bigquery.py >> cron.log 2>&1
+
+
+📊 MONITORING
+════════════════════════════════════════════════════════════════
+
+Kontrola stavu:
+  make status
+
+Živé logy:
+  make logs
+
+Posledních 50 řádků:
+  make logs-tail
+
+Jen chyby:
+  make logs-errors
+
+
+🔧 VŠECHNY PŘÍKAZY (make help)
+════════════════════════════════════════════════════════════════
+
+  make install      - Instalace závislostí
+  make config       - Konfigurace
+  make test-conn    - Test připojení
+  make test-sync    - Test synchronizace
+  make sync         - Spuštění synchronizace
+  make status       - Status poslední sync
+  make logs         - Živé sledování logů
+  make logs-tail    - Posledních 50 řádků
+  make logs-errors  - Jen chyby
+  make clean        - Vyčištění logů
+
+
+⚠️  CO JE POTŘEBA UPRAVIT V CONFIG.JSON
+════════════════════════════════════════════════════════════════
+
+{
+  "mssql": {
+    "server": "tvuj_server",           ← ZMĚŇ
+    "database": "master",               ← MOŽNÁ ZMĚŇ
+    "username": "tvuj_username",        ← ZMĚŇ
+    "password": "tvoje_heslo",          ← ZMĚŇ
+    "driver": "ODBC Driver 17 for SQL Server",  ← ZKONTROLUJ
+    "timeout": 30
+  },
+  ...
+  "sentry": {
+    "dsn": "tvoje_sentry_dsn",          ← ZMĚŇ (nebo nech prázdné)
+    ...
+  }
+}
+
+
+🐛 TROUBLESHOOTING
+════════════════════════════════════════════════════════════════
+
+❌ "companies tabulka nenalezena"
+→ Zkontroluj, že databáze obsahuje tabulku "companies" s poli:
+  - linked_server (varchar)
+  - database (varchar)
+
+❌ "ODBC Driver nenalezen"
+→ Nainstaluj:
+  curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
+  curl https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+  sudo apt-get update
+  sudo ACCEPT_EULA=Y apt-get install -y msodbcsql17
+
+❌ BigQuery oprávnění chyba
+→ Service account (veverka.json) potřebuje role:
+  - BigQuery Data Editor
+  - BigQuery Job User
+
+
+📞 DALŠÍ POMOC
+════════════════════════════════════════════════════════════════
+
+📖 README.md           - Podrobná dokumentace
+📖 QUICKSTART.md       - Rychlý průvodce
+📖 ARCHITECTURE.md     - Architektura a diagram
+📖 crontab.example     - Příklady cron nastavení
+
+Logy: sync.log
+Cron logy: cron.log
+Sentry: https://sentry.io (pokud nakonfigurováno)
+
+
+✨ HOTOVO!
+════════════════════════════════════════════════════════════════
+Vše je připraveno. Stačí:
+  1. make config
+  2. make test-conn
+  3. make test-sync
+  4. Přidat do crontab
+
+Hodně štěstí! 🚀

@@ -1,0 +1,5 @@
+theme: jekyll-theme-cayman
+title: Pohoda → BigQuery Sync
+description: Automatická synchronizace dat z MS SQL (Pohoda) do Google BigQuery
+show_downloads: true
+google_analytics: 

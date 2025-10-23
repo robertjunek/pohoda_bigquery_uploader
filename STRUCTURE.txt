@@ -1,0 +1,171 @@
+apoteka_veverka/
+│
+├── 📋 KONFIGURACE
+│   ├── config.json                     # MS SQL, BigQuery, Sentry konfigurace
+│   ├── veverka.json                    # Google Cloud credentials
+│   └── requirements.txt                # Python závislosti
+│
+├── 🔍 SQL DOTAZY
+│   ├── FA.sql                          # Faktury
+│   ├── PH.sql                          # Prodejky
+│   ├── SKPP.sql                        # Příjemky
+│   └── SKPV.sql                        # Výdejky
+│
+├── 🚀 HLAVNÍ SKRIPTY
+│   ├── sync_pohoda_to_bigquery.py      # Hlavní synchronizační skript
+│   ├── setup_config.py                 # Konfigurace MS SQL připojení
+│   ├── test_connections.py             # Test připojení k databázím
+│   ├── test_sync.sh                    # Testovací spuštění (bash)
+│   └── check_status.py                 # Kontrola stavu synchronizace
+│
+├── 📖 DOKUMENTACE
+│   ├── README.md                       # Kompletní dokumentace
+│   ├── QUICKSTART.md                   # Rychlý start
+│   ├── ARCHITECTURE.md                 # Diagram architektury
+│   ├── TODO.txt                        # Přehled všech souborů + TODO
+│   └── STRUCTURE.txt                   # Tento soubor
+│
+├── 🛠️  POMOCNÉ SOUBORY
+│   ├── Makefile                        # Snadné ovládání (make help)
+│   ├── crontab.example                 # Příklady cron nastavení
+│   └── .gitignore                      # Git ignore soubor
+│
+├── 📁 SLOŽKY
+│   └── .venv/                          # Python virtual environment
+│
+└── 📝 GENEROVANÉ (při běhu)
+    ├── sync.log                        # Hlavní log soubor
+    ├── sync.log.1, .2, ...             # Rotované logy
+    └── cron.log                        # Cron výstup
+
+
+═══════════════════════════════════════════════════════════════
+PŘEHLED FUNKCÍ
+═══════════════════════════════════════════════════════════════
+
+sync_pohoda_to_bigquery.py
+──────────────────────────
+✓ Připojení k MS SQL serveru
+✓ Získání linked_server a database z tabulky companies
+✓ Načtení SQL souborů a přidání prefixů k tabulkám
+✓ Stahování dat po dávkách (5000 záznamů)
+✓ Nahrávání do BigQuery po dávkách
+✓ Rotační logování do souboru
+✓ Error tracking přes Sentry.io
+✓ Kompletní error handling
+✓ Správný exit code pro cron
+
+setup_config.py
+───────────────
+✓ Interaktivní konfigurace MS SQL připojení
+✓ Nastavení Sentry DSN
+✓ Uložení do config.json
+
+test_connections.py
+───────────────────
+✓ Test MS SQL připojení
+✓ Kontrola tabulky companies
+✓ Test BigQuery připojení
+✓ Kontrola datasetu
+✓ Ověření SQL souborů
+
+test_sync.sh
+────────────
+✓ Kontrola virtual environment
+✓ Kontrola konfiguračních souborů
+✓ Spuštění synchronizace
+✓ Zobrazení výsledku
+
+check_status.py
+───────────────
+✓ Parsování sync.log
+✓ Zobrazení stavu poslední synchronizace
+✓ Seznam zpracovaných tabulek
+✓ Seznam chyb (pokud jsou)
+
+
+═══════════════════════════════════════════════════════════════
+WORKFLOW
+═══════════════════════════════════════════════════════════════
+
+1. INSTALACE (jednorázově)
+   ├─ source .venv/bin/activate
+   └─ pip install -r requirements.txt  ✓ HOTOVO
+
+2. KONFIGURACE (jednorázově)
+   ├─ make config
+   │  (nebo: python setup_config.py)
+   └─ Zadej MS SQL credentials a Sentry DSN
+
+3. TEST PŘIPOJENÍ
+   ├─ make test-conn
+   └─ (nebo: python test_connections.py)
+
+4. TESTOVACÍ SYNCHRONIZACE
+   ├─ make test-sync
+   └─ (nebo: ./test_sync.sh)
+
+5. NASTAVENÍ CRON (pro automatiku)
+   ├─ crontab -e
+   └─ Přidej: 0 2 * * * cd /home/robert/projekty/apoteka_veverka && .venv/bin/python sync_pohoda_to_bigquery.py >> cron.log 2>&1
+
+6. MONITORING
+   ├─ make status         # Stav poslední sync
+   ├─ make logs           # Živé sledování
+   └─ make logs-errors    # Jen chyby
+
+
+═══════════════════════════════════════════════════════════════
+VELIKOSTI SOUBORŮ
+═══════════════════════════════════════════════════════════════
+
+sync_pohoda_to_bigquery.py    16 KB   (hlavní skript)
+config.json                   ~1 KB   (konfigurace)
+veverka.json                  ~2 KB   (credentials)
+test_connections.py           ~5 KB   (testy)
+check_status.py               ~4 KB   (monitoring)
+README.md + dokumentace       ~15 KB  (dokumentace)
+
+Celkem: ~45 KB (bez .venv a logů)
+
+
+═══════════════════════════════════════════════════════════════
+ZÁVISLOSTI (requirements.txt)
+═══════════════════════════════════════════════════════════════
+
+pyodbc==5.0.1                 # MS SQL připojení
+google-cloud-bigquery==3.14.1 # BigQuery API
+pandas==2.1.4                 # Data manipulace
+sentry-sdk==1.39.2            # Error tracking
+python-dotenv==1.0.0          # Environment variables
+
++ všechny sub-závislosti (google-auth, numpy, atd.)
+Celkem ~150 MB v .venv
+
+
+═══════════════════════════════════════════════════════════════
+BEZPEČNOST
+═══════════════════════════════════════════════════════════════
+
+✓ config.json v .gitignore (obsahuje hesla)
+✓ veverka.json v .gitignore (Google credentials)
+✓ sync.log* v .gitignore (může obsahovat citlivá data)
+✓ Connection timeout (30s)
+✓ Error tracking přes Sentry
+✓ Rotační logy (max 10 MB × 5)
+
+DŮLEŽITÉ: Nikdy necommituj config.json a veverka.json do gitu!
+
+
+═══════════════════════════════════════════════════════════════
+VÝKON
+═══════════════════════════════════════════════════════════════
+
+Batch size:          5000 záznamů
+Timeout:             30 sekund
+Paralelizace:        Ne (sekvenční zpracování tabulek)
+Retry logika:        Ne (fail-fast s logováním do Sentry)
+
+Odhadovaný čas:      Závisí na množství dat
+                     ~1-5 minut pro několik tisíc záznamů
+                     ~10-30 minut pro statisíce záznamů
