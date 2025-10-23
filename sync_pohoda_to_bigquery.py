@@ -225,7 +225,8 @@ class PohodaBigQuerySync:
             'PH', 'PHpol',
             'SKPP', 'SKPPpol',
             'SKPV', 'SKPVpol',
-            'sStr', 'sCin', 'AD', 'sZeme', 'sSklad'
+            'sStr', 'sCin', 'AD', 'sZeme', 'sSklad',
+            'sFormUh', 'Kasa'
         ]
         
         modified_sql = sql_content
@@ -303,6 +304,41 @@ class PohodaBigQuerySync:
             capture_exception(e)
             raise
 
+    def _prepare_dataframe_for_bigquery(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Připraví DataFrame pro nahrání do BigQuery.
+        Ošetří NULL hodnoty a datové typy a duplicitní sloupce.
+        
+        Args:
+            df: Původní DataFrame
+            
+        Returns:
+            Upravený DataFrame
+        """
+        df = df.copy()
+        
+        # Ošetření duplicitních názvů sloupců
+        cols = pd.Series(df.columns)
+        for dup in cols[cols.duplicated()].unique():
+            # Pro každý duplicitní sloupec přidáme číslo
+            indices = cols[cols == dup].index.tolist()
+            for i, idx in enumerate(indices):
+                if i > 0:  # První necháme bez čísla
+                    cols[idx] = f"{dup}_{i}"
+        df.columns = cols
+        
+        # Ošetření None hodnot v object sloupcích
+        for col in df.columns:
+            try:
+                if df[col].dtype == 'object':
+                    # Object sloupce - nahraď None prázdným stringem nebo None
+                    df[col] = df[col].where(pd.notna(df[col]), None)
+            except Exception as e:
+                self.logger.warning(f"Problém s převodem sloupce {col}: {e}")
+                continue
+        
+        return df
+
     def upload_to_bigquery(self, df: pd.DataFrame, table_name: str, batch_size: int):
         """
         Nahraje data do BigQuery po dávkách.
@@ -322,6 +358,9 @@ class PohodaBigQuerySync:
             if total_rows == 0:
                 self.logger.warning(f"Žádná data k nahrání pro tabulku {table_name}")
                 return
+            
+            # Ošetření NULL hodnot a datových typů
+            df = self._prepare_dataframe_for_bigquery(df)
             
             self.logger.info(f"Nahrávám {total_rows} záznamů do {table_id}...")
             
