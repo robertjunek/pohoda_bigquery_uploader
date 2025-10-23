@@ -1,6 +1,7 @@
 # Credentials a konfigurace
 config.json
 pohoda_bigquery_uploader.json
+credentials.json
 
 # Logs
 *.log
