@@ -1,25 +1,42 @@
-.PHONY: help install config test-conn test-sync sync status logs clean
+.PHONY: help install install-odbc config test-conn test-sync sync status logs clean
 
 # Výchozí cíl
 help:
 	@echo "📋 Dostupné příkazy:"
 	@echo ""
+	@echo "🔧 Instalace:"
+	@echo "  make install-odbc - Instalace ODBC Driver (vyžaduje sudo)"
 	@echo "  make install      - Instalace závislostí do venv"
+	@echo ""
+	@echo "⚙️  Konfigurace:"
 	@echo "  make config       - Konfigurace MS SQL připojení"
 	@echo "  make test-conn    - Test připojení k databázím"
+	@echo ""
+	@echo "🚀 Spouštění:"
 	@echo "  make test-sync    - Testovací spuštění synchronizace"
 	@echo "  make sync         - Spuštění synchronizace"
+	@echo ""
+	@echo "📊 Monitoring:"
 	@echo "  make status       - Zobrazení stavu poslední synchronizace"
 	@echo "  make logs         - Živé sledování logů"
 	@echo "  make logs-tail    - Posledních 50 řádků logu"
 	@echo "  make logs-errors  - Jen chyby z logu"
+	@echo ""
+	@echo "🧹 Údržba:"
 	@echo "  make clean        - Vyčištění logů a cache"
 	@echo ""
-	@echo "🚀 Rychlý start:"
-	@echo "  1. make config"
-	@echo "  2. make test-conn"
-	@echo "  3. make test-sync"
+	@echo "🚀 Rychlý start na novém serveru:"
+	@echo "  1. make install-odbc"
+	@echo "  2. make install"
+	@echo "  3. make config"
+	@echo "  4. make test-conn"
+	@echo "  5. make test-sync"
 	@echo ""
+
+install-odbc:
+	@echo "🔧 Instalace ODBC Driver..."
+	@echo "⚠️  Tento příkaz vyžaduje sudo práva!"
+	@./install_odbc.sh
 
 install:
 	@echo "📦 Instalace závislostí..."
