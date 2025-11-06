@@ -466,6 +466,7 @@ class PohodaBigQuerySync:
         """
         Připraví DataFrame pro nahrání do BigQuery.
         Ošetří NULL hodnoty a datové typy a duplicitní sloupce.
+        VŠECHNY sloupce kromě Datum, množství a cen jsou STRING.
         
         Args:
             df: Původní DataFrame
@@ -490,86 +491,59 @@ class PohodaBigQuerySync:
                 seen[col] = 0
         df.columns = cols
         
+        # Sloupce, které můžou být numerické (množství a ceny)
+        numeric_columns = {'Mnozstvi', 'KcJedn', 'Kc', 'Pocet', 'Cena'}
+        
         # Ošetření datových typů a NULL hodnot
         for col in df.columns:
             try:
-                # Kontrola na binární data (bytestring) - typicky GUID/UUID z SQL Serveru
-                if df[col].dtype == 'object':
-                    non_null_values = df[col].dropna()
-                    if len(non_null_values) > 0:
-                        first_val = non_null_values.iloc[0]
-                        
-                        # Pokud je to datetime.date, převeď na pandas datetime
-                        if isinstance(first_val, (datetime.date, datetime.datetime)):
-                            self.logger.info(f"Sloupec {col} obsahuje date/datetime, převádím na pandas datetime")
-                            df[col] = pd.to_datetime(df[col])
-                            continue
-                        
-                        # Pokud je to decimal.Decimal, převeď na float
-                        if isinstance(first_val, decimal.Decimal):
-                            self.logger.info(f"Sloupec {col} obsahuje Decimal, převádím na float")
-                            def convert_decimal(val):
-                                if val is None or pd.isna(val):
-                                    return None
-                                if isinstance(val, decimal.Decimal):
-                                    return float(val)
-                                return val
-                            
-                            df[col] = df[col].apply(convert_decimal)
-                            continue
-                        
-                        # Pokud je to bytes, je to pravděpodobně GUID z SQL Serveru
-                        if isinstance(first_val, bytes):
-                            self.logger.info(f"Sloupec {col} obsahuje binární data (GUID), převádím na string")
-                            def convert_guid(val):
-                                if val is None or pd.isna(val):
-                                    return None
-                                if isinstance(val, bytes):
-                                    try:
-                                        # Pokus o převod bytes na UUID string
-                                        import uuid
-                                        # SQL Server GUID má jiné pořadí bytů
-                                        return str(uuid.UUID(bytes_le=val))
-                                    except Exception as e:
-                                        self.logger.warning(f"Nepodařilo se převést GUID: {e}, používám hex")
-                                        return val.hex()
-                                return str(val)
-                            
-                            df[col] = df[col].apply(convert_guid)
-                            continue
-                        
-                        # Test zda obsahuje mix čísel a stringů
-                        has_numeric = False
-                        has_string = False
-                        
-                        for val in non_null_values.head(100):  # Sample prvních 100 hodnot
-                            if pd.api.types.is_number(val):
-                                has_numeric = True
-                            elif isinstance(val, str) and val.strip():
-                                has_string = True
-                            
-                            if has_numeric and has_string:
-                                break
-                        
-                        # Pokud obsahuje mix, převeď vše na string
-                        if has_numeric and has_string:
-                            self.logger.warning(f"Sloupec {col} obsahuje mixed types, převádím na string")
-                            df[col] = df[col].astype(str).replace('nan', None).replace('None', None)
-                        else:
-                            # Jen stringy nebo jen čísla
-                            df[col] = df[col].where(pd.notna(df[col]), None)
-                    else:
-                        # Prázdný sloupec
-                        df[col] = None
-                        
-                elif df[col].dtype in ['int64', 'float64']:
-                    # Numeric sloupce - nahraď NaN jako None pro BigQuery
+                # Datum - převést na pandas datetime
+                if col == 'Datum':
+                    self.logger.debug(f"Sloupec {col} - převádím na datetime")
+                    df[col] = pd.to_datetime(df[col])
                     df[col] = df[col].where(pd.notna(df[col]), None)
+                    continue
+                
+                # Množství a ceny - převést na float
+                if col in numeric_columns:
+                    self.logger.debug(f"Sloupec {col} - převádím na float")
                     
-                elif 'datetime' in str(df[col].dtype):
-                    # Datetime sloupce - ošetření NaT
-                    df[col] = df[col].where(pd.notna(df[col]), None)
+                    def convert_to_float(val):
+                        if val is None or pd.isna(val):
+                            return None
+                        if isinstance(val, decimal.Decimal):
+                            return float(val)
+                        try:
+                            return float(val)
+                        except (ValueError, TypeError):
+                            self.logger.warning(f"Nelze převést na float: {val} v sloupci {col}")
+                            return None
                     
+                    df[col] = df[col].apply(convert_to_float)
+                    continue
+                
+                # VŠECHNY OSTATNÍ SLOUPCE - převést na STRING
+                self.logger.debug(f"Sloupec {col} - převádím na string")
+                
+                def convert_to_string(val):
+                    if val is None or pd.isna(val):
+                        return None
+                    if isinstance(val, bytes):
+                        # GUID z SQL Serveru
+                        try:
+                            import uuid
+                            return str(uuid.UUID(bytes_le=val))
+                        except Exception:
+                            return val.hex()
+                    if isinstance(val, (datetime.date, datetime.datetime)):
+                        return val.strftime('%Y-%m-%d %H:%M:%S') if isinstance(val, datetime.datetime) else val.strftime('%Y-%m-%d')
+                    if isinstance(val, decimal.Decimal):
+                        return str(val)
+                    # Vše ostatní jako string
+                    return str(val)
+                
+                df[col] = df[col].apply(convert_to_string)
+                        
             except Exception as e:
                 self.logger.warning(f"Problém s převodem sloupce {col}: {e}, převádím na string")
                 # Pokud selže cokoliv, převeď sloupec na string
@@ -583,7 +557,7 @@ class PohodaBigQuerySync:
     def _get_bigquery_schema_from_dataframe(self, df: pd.DataFrame) -> list:
         """
         Vytvoří BigQuery schéma z DataFrame s bezpečnými typy.
-        Automaticky detekuje typy ze sloupců DataFrame.
+        Všechny sloupce kromě Datum, množství a cen jsou STRING.
         
         Args:
             df: DataFrame pro analýzu
@@ -593,27 +567,21 @@ class PohodaBigQuerySync:
         """
         schema = []
         
+        # Sloupce, které můžou být numerické (množství a ceny)
+        numeric_columns = {'Mnozstvi', 'KcJedn', 'Kc', 'Pocet', 'Cena'}
+        
         for col in df.columns:
             # Automatická detekce typu podle pandas dtype
             dtype_str = str(df[col].dtype)
             
-            if col == 'ID':
-                # ID je vždy string
-                field_type = "STRING"
-            elif 'datetime' in dtype_str or 'timestamp' in dtype_str:
-                # Datetime sloupce
+            if col == 'Datum' and ('datetime' in dtype_str or 'timestamp' in dtype_str):
+                # Datum jako TIMESTAMP
                 field_type = "TIMESTAMP"
-            elif dtype_str == 'float64':
-                # Float sloupce
+            elif col in numeric_columns:
+                # Množství a ceny jako FLOAT64
                 field_type = "FLOAT64"
-            elif dtype_str in ['int64', 'int32', 'int16']:
-                # Integer sloupce
-                field_type = "INTEGER"
-            elif dtype_str == 'bool':
-                # Boolean sloupce
-                field_type = "BOOLEAN"
             else:
-                # Vše ostatní jako STRING (object, string, mixed types)
+                # VŠE OSTATNÍ jako STRING (včetně ID, RefCin, RefStr, atd.)
                 field_type = "STRING"
             
             schema.append(
