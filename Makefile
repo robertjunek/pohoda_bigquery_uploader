@@ -1,4 +1,4 @@
-.PHONY: help install install-odbc config test-conn test-sync sync status logs clean
+.PHONY: help install install-odbc config test-conn test-sync sync status logs clean diagnose
 
 # Výchozí cíl
 help:
@@ -11,6 +11,7 @@ help:
 	@echo "⚙️  Konfigurace:"
 	@echo "  make config       - Konfigurace MS SQL připojení"
 	@echo "  make test-conn    - Test připojení k databázím"
+	@echo "  make diagnose     - Diagnostika ODBC problémů"
 	@echo ""
 	@echo "🚀 Spouštění:"
 	@echo "  make test-sync    - Testovací spuštění synchronizace"
@@ -79,3 +80,7 @@ clean:
 	@find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	@find . -type f -name "*.pyc" -delete
 	@echo "✅ Vyčištěno"
+
+diagnose:
+	@echo "🩺 ODBC diagnostika..."
+	@python3 diagnose_odbc.py
