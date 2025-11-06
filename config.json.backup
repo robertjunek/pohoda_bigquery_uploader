@@ -1,0 +1,40 @@
+{
+  "mssql": {
+    "server": "192.168.1.50",
+    "database": "pohodapicking",
+    "username": "sa",
+    "password": "robert",
+    "driver": "ODBC Driver 18 for SQL Server",
+    "timeout": 30,
+    "trust_server_certificate": true
+  },
+  "bigquery": {
+    "project_id": "havlikova-apoteka",
+    "dataset": "pohoda",
+    "credentials_file": "credentials.json",
+    "location": "EU"
+  },
+  "sync": {
+    "batch_size": 20000,
+    "mode": "full",
+    "sql_files": [
+      "FA.sql",
+      "PH.sql",
+      "SKPP.sql",
+      "SKPV.sql"
+    ],
+    "days_back": 7,
+    "full_sync_days_back": 4000
+  },
+  "logging": {
+    "log_file": "sync.log",
+    "log_level": "INFO",
+    "max_bytes": 10485760,
+    "backup_count": 5
+  },
+  "sentry": {
+    "dsn": "",
+    "environment": "dev",
+    "traces_sample_rate": 0.1
+  }
+}

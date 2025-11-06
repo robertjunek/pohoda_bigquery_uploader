@@ -211,16 +211,16 @@ class PohodaBigQuerySync:
 
     def get_last_sync_info(self, table_name: str) -> dict:
         """
-        Získá informace o poslední synchronizaci tabulky.
+        Zkontroluje, zda tabulka v BigQuery existuje.
+        NEPOUŽÍVÁ metadata tabulku - pouze kontroluje existenci.
         
         Returns:
-            dict: {'exists': bool, 'last_max_date': date, 'record_count': int}
+            dict: {'exists': bool}
         """
         try:
             dataset_id = self.config['bigquery']['dataset']
             project_id = self.config['bigquery']['project_id']
             table_id = f"{project_id}.{dataset_id}.{table_name}"
-            metadata_table_id = f"{project_id}.{dataset_id}._sync_metadata"
             
             # Zkontrolujeme, zda hlavní tabulka existuje
             table_exists = True
@@ -229,64 +229,14 @@ class PohodaBigQuerySync:
             except NotFound:
                 table_exists = False
                 
-            if not table_exists:
-                return {
-                    'exists': False,
-                    'last_max_date': None,
-                    'record_count': 0
-                }
-            
-            # Získáme metadata o poslední synchronizaci
-            query = f"""
-                SELECT 
-                    last_max_date,
-                    records_synced,
-                    last_sync_timestamp
-                FROM `{metadata_table_id}`
-                WHERE table_name = '{table_name}'
-                ORDER BY updated_at DESC
-                LIMIT 1
-            """
-            
-            try:
-                result = self.bq_client.query(query).result()
-                row = next(iter(result), None)
-                
-                if row:
-                    return {
-                        'exists': True,
-                        'last_max_date': row.last_max_date,
-                        'record_count': row.records_synced or 0,
-                        'last_sync_timestamp': row.last_sync_timestamp
-                    }
-            except Exception:
-                # Metadata tabulka nebo záznam neexistuje
-                pass
-            
-            # Pokud nemáme metadata, získáme info přímo z hlavní tabulky
-            query = f"""
-                SELECT 
-                    COUNT(*) as record_count,
-                    MAX(Datum) as max_date
-                FROM `{table_id}`
-            """
-            
-            result = self.bq_client.query(query).result()
-            row = next(result)
-            
             return {
-                'exists': True,
-                'last_max_date': row.max_date,
-                'record_count': row.record_count or 0,
-                'last_sync_timestamp': None
+                'exists': table_exists
             }
             
         except Exception as e:
-            self.logger.warning(f"Chyba při získávání sync info pro {table_name}: {e}")
+            self.logger.warning(f"Chyba při získávání info o tabulce {table_name}: {e}")
             return {
-                'exists': False,
-                'last_max_date': None,
-                'record_count': 0
+                'exists': False
             }
 
     def update_sync_metadata(self, table_name: str, records_count: int, max_date):
@@ -369,15 +319,16 @@ class PohodaBigQuerySync:
 
     def _add_table_prefix(self, sql_content: str, sync_info: dict = None, table_name: str = None) -> str:
         """
-        Přidá prefix ke všem tabulkám v SQL dotazu a upraví pro incremental sync.
+        Přidá prefix ke všem tabulkám v SQL dotazu.
+        IGNORUJE metadata - používá pouze days_back z konfigurace.
         
         Args:
             sql_content: Obsah SQL souboru
-            sync_info: Informace o poslední synchronizaci
+            sync_info: Informace o tabulce (nepoužívá se pro datum)
             table_name: Název tabulky
             
         Returns:
-            Upravený SQL dotaz s prefixy a incremental logikou
+            Upravený SQL dotaz s prefixy
         """
         # Prefix pro tabulky: [linked_server].[database].dbo.
         prefix = f"[{self.linked_server}].[{self.pohoda_database}].dbo."
@@ -410,31 +361,15 @@ class PohodaBigQuerySync:
                     flags=re.IGNORECASE
                 )
 
-        # Logika pro days_back podle sync mode
-        if self.sync_mode == 'incremental' and sync_info and sync_info.get('exists'):
-            # Pro incremental sync - menší okno pro bezpečnost
-            days_back = self.config['sync'].get('days_back', 7)
-            
-            # Pokud máme datum poslední synchronizace, přidáme podmínku
-            if sync_info.get('last_max_date'):
-                last_date = sync_info['last_max_date']
-                incremental_condition = f"\nAND CAST(h.Datum AS DATE) >= CAST('{last_date}' AS DATE)"
-                
-                # Najdeme existující WHERE a přidáme podmínku
-                if 'WHERE r.Kod IS NOT NULL' in modified_sql:
-                    modified_sql = modified_sql.replace(
-                        'WHERE r.Kod IS NOT NULL',
-                        f'WHERE r.Kod IS NOT NULL{incremental_condition}'
-                    )
-                    
-                self.logger.info(f"Incremental sync pro {table_name} - data od {last_date}")
+        # Určení days_back podle sync mode - IGNORUJEME metadata
+        if self.sync_mode == 'full':
+            days_back = self.config['sync'].get('full_sync_days_back', 
+                                              self.config['sync'].get('days_back', 14))
+            self.logger.info(f"Full load pro {table_name} - days_back: {days_back}")
         else:
-            # Full sync - použije days_back z konfigurace  
-            if self.sync_mode == 'full':
-                days_back = self.config['sync'].get('full_sync_days_back', 
-                                                  self.config['sync'].get('days_back', 14))
-            else:
-                days_back = self.config['sync'].get('days_back', 14)
+            # Incremental - také používá days_back
+            days_back = self.config['sync'].get('days_back', 7)
+            self.logger.info(f"Incremental load pro {table_name} - days_back: {days_back}")
 
         # Nahrazení placeholderu <DAYS_BACK>
         modified_sql = re.sub(r'<DAYS_BACK>', str(days_back), modified_sql)
@@ -967,6 +902,7 @@ class PohodaBigQuerySync:
     def sync_table(self, sql_file: str):
         """
         Synchronizuje jednu tabulku z SQL souboru s podporou full/incremental mode.
+        IGNORUJE metadata tabulku - řídí se pouze days_back z konfigurace.
         
         Args:
             sql_file: Název SQL souboru
@@ -978,17 +914,18 @@ class PohodaBigQuerySync:
             self.logger.info(f"Synchronizace tabulky: {table_name} (mode: {self.sync_mode})")
             self.logger.info(f"{'='*60}")
             
-            # 1. Získání informací o poslední synchronizaci (pro incremental mode)
-            sync_info = self.get_last_sync_info(table_name) if self.sync_mode == 'incremental' else None
+            # 1. Zjistíme pouze zda tabulka existuje (pro incremental mode)
+            sync_info = self.get_last_sync_info(table_name)
             
-            if sync_info:
-                self.logger.info(
-                    f"Sync info - Existuje: {sync_info['exists']}, "
-                    f"Posledních záznamů: {sync_info['record_count']}, "
-                    f"Max datum: {sync_info.get('last_max_date')}"
-                )
+            if self.sync_mode == 'full':
+                self.logger.info(f"Full load - tabulka bude vyčištěna a nahrána data podle days_back")
+            elif self.sync_mode == 'incremental':
+                if sync_info and sync_info.get('exists'):
+                    self.logger.info(f"Incremental load - UPSERT podle ID, data podle days_back")
+                else:
+                    self.logger.info(f"Incremental load - tabulka neexistuje, vytvoří se nová")
             
-            # 2. Načtení a úprava SQL
+            # 2. Načtení a úprava SQL (sync_info se používá jen pro kontrolu existence)
             sql_query = self.load_and_prepare_sql(sql_file, sync_info)
             
             # 3. Stažení dat
@@ -997,13 +934,14 @@ class PohodaBigQuerySync:
             
             # 4. Nahrání podle sync mode
             if self.sync_mode == 'incremental' and sync_info and sync_info.get('exists'):
-                # Incremental sync - MERGE
+                # Incremental sync - MERGE (UPSERT podle ID)
                 self.upload_with_merge(df, table_name, batch_size)
             else:
                 # Full sync - TRUNCATE a INSERT
+                # Nebo incremental když tabulka neexistuje
                 self.upload_to_bigquery(df, table_name, batch_size)
             
-            # 5. Aktualizace metadata
+            # 5. Aktualizace metadata (volitelné, pro tracking)
             if len(df) > 0:
                 # Bezpečné získání max datum
                 try:
