@@ -12,12 +12,19 @@ ImportError: libodbc.so.2: cannot open shared object file: No such file or direc
 make install-odbc
 ```
 
-### 2. Manuální instalace
+### 2. Pro Debian 12 (pokud základní instalace selže)
 ```bash
-sudo ./install_odbc.sh
+make install-odbc-alt
 ```
 
-### 3. Diagnostika problému
+### 3. Manuální instalace
+```bash
+sudo ./install_odbc.sh
+# nebo pro Debian 12
+sudo ./install_odbc_alternative.sh
+```
+
+### 4. Diagnostika problému
 ```bash
 make diagnose
 ```
@@ -46,6 +53,12 @@ make diagnose
    ```
 
 ## Řešení problémů
+
+### Chyba: "Repository not found" (Debian 12)
+Microsoft zatím neposkytuje oficiální repository pro Debian 12. Použijte:
+```bash
+make install-odbc-alt
+```
 
 ### Chyba: "odbcinst command not found"
 ```bash

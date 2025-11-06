@@ -2,28 +2,39 @@
 
 Skript pro automatickou synchronizaci dat z MS SQL (Pohoda) do Google BigQuery.
 
-## 🚀 Rychlý start
+## � Rychlé řešení chyby libodbc.so.2
 
-### 1. Instalace závislostí
+Pokud dostáváte chybu s `libodbc.so.2`, spusťte:
 ```bash
-source .venv/bin/activate
-pip install -r requirements.txt 
+make install-odbc
+```
+Více detailů: [ODBC_FIX.md](ODBC_FIX.md)
+
+## �🚀 Rychlý start
+
+### 1. Instalace ODBC Driver (pouze jednou)
+```bash
+make install-odbc
 ```
 
-### 2. Konfigurace
+### 2. Instalace Python závislostí
 ```bash
-python setup_config.py
-```
-Zadej přihlašovací údaje k MS SQL serveru a Sentry DSN (volitelné).
-
-### 3. Test připojení
-```bash
-python test_connections.py
+make install
 ```
 
-### 4. Spuštění synchronizace
+### 3. Konfigurace
 ```bash
-./test_sync.sh
+make config
+```
+
+### 4. Test připojení
+```bash
+make test-conn
+```
+
+### 5. Spuštění synchronizace
+```bash
+make test-sync
 ```
 
 ## Konfigurace

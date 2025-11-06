@@ -51,10 +51,16 @@ if [[ $OS == *"Ubuntu"* ]] || [[ $OS == *"Debian"* ]]; then
         echo "deb [arch=amd64] https://packages.microsoft.com/ubuntu/${UBUNTU_VERSION}/prod ${UBUNTU_VERSION} main" | \
             sudo tee /etc/apt/sources.list.d/mssql-release.list
     else
-        # Debian
+        # Debian - použijeme Debian 11 repository pro Debian 12 (kompatibilní)
         DEBIAN_VERSION=$(echo $VERSION | cut -d'.' -f1)
-        echo "deb [arch=amd64] https://packages.microsoft.com/debian/${DEBIAN_VERSION}/prod ${DEBIAN_VERSION} main" | \
-            sudo tee /etc/apt/sources.list.d/mssql-release.list
+        if [ "$DEBIAN_VERSION" = "12" ]; then
+            echo "⚠️  Debian 12 - používám Debian 11 repository (kompatibilní)"
+            echo "deb [arch=amd64] https://packages.microsoft.com/debian/11/prod 11 main" | \
+                sudo tee /etc/apt/sources.list.d/mssql-release.list
+        else
+            echo "deb [arch=amd64] https://packages.microsoft.com/debian/${DEBIAN_VERSION}/prod ${DEBIAN_VERSION} main" | \
+                sudo tee /etc/apt/sources.list.d/mssql-release.list
+        fi
     fi
     
     # Aktualizace s novým repository
