@@ -21,8 +21,8 @@ if [ ! -f "config.json" ]; then
     exit 1
 fi
 
-if [ ! -f "pohoda_bigquery_uploader.json" ]; then
-    echo "❌ Credentials pohoda_bigquery_uploader.json nenalezen!"
+if [ ! -f "credentials.json" ]; then
+    echo "❌ Credentials credentials.json nenalezen!"
     exit 1
 fi
 

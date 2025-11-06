@@ -37,5 +37,5 @@ LEFT JOIN sCin cin   ON cin.ID = COALESCE(NULLIF(r.RefCin, 0), NULLIF(h.RefCin, 
 LEFT JOIN AD ad      ON ad.ID = h.RefAD
 LEFT JOIN sZeme zem  ON zem.ID = ad.RefZeme
 WHERE r.Kod IS NOT NULL
-AND COALESCE(h.DatSave, h.DatCreate ) >= GETDATE() - 14
+AND COALESCE(h.DatSave, h.DatCreate ) >= GETDATE() - <DAYS_BACK>
 ;

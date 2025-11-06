@@ -41,5 +41,5 @@ LEFT JOIN sZeme zem  ON zem.ID = ad.RefZeme
 LEFT JOIN sFormUh uh ON uh.ID = h.RelForUh
 LEFT JOIN Kasa k ON k.ID = h.RefKasa 
 WHERE r.Kod IS NOT NULL
-AND COALESCE(h.DatSave, h.DatCreate ) >= GETDATE() - 14
+AND COALESCE(h.DatSave, h.DatCreate ) >= GETDATE() - <DAYS_BACK>
 ;

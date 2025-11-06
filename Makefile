@@ -1,4 +1,4 @@
-.PHONY: help install install-odbc install-odbc-alt finish-odbc config test-conn test-sync sync status logs clean diagnose
+.PHONY: help install install-odbc install-odbc-alt finish-odbc config test-conn test-sync test-sync-incremental test-sync-full sync sync-incremental sync-full status logs clean diagnose
 
 # Výchozí cíl
 help:
@@ -16,8 +16,12 @@ help:
 	@echo "  make diagnose     - Diagnostika ODBC problémů"
 	@echo ""
 	@echo "🚀 Spouštění:"
-	@echo "  make test-sync    - Testovací spuštění synchronizace"
-	@echo "  make sync         - Spuštění synchronizace"
+	@echo "  make test-sync      - Testovací spuštění synchronizace (current mode)"
+	@echo "  make test-sync-full - Testovací spuštění (full mode)"
+	@echo "  make test-sync-inc  - Testovací spuštění (incremental mode)"
+	@echo "  make sync           - Spuštění synchronizace (current mode)"
+	@echo "  make sync-full      - Spuštění (full mode)"
+	@echo "  make sync-inc       - Spuštění (incremental mode)"
 	@echo ""
 	@echo "📊 Monitoring:"
 	@echo "  make status       - Zobrazení stavu poslední synchronizace"
@@ -69,9 +73,41 @@ test-sync:
 	@echo "🧪 Testovací synchronizace..."
 	@./test_sync.sh
 
+test-sync-full:
+	@echo "🧪 Testovací synchronizace (FULL mode)..."
+	@echo "⚙️  Dočasně nastavuji mode na 'full'..."
+	@cp config.json config.json.backup
+	@sed 's/"mode": "[^"]*"/"mode": "full"/g' config.json > config.json.tmp && mv config.json.tmp config.json
+	@./test_sync.sh
+	@mv config.json.backup config.json
+
+test-sync-inc:
+	@echo "🧪 Testovací synchronizace (INCREMENTAL mode)..."
+	@echo "⚙️  Dočasně nastavuji mode na 'incremental'..."
+	@cp config.json config.json.backup
+	@sed 's/"mode": "[^"]*"/"mode": "incremental"/g' config.json > config.json.tmp && mv config.json.tmp config.json
+	@./test_sync.sh
+	@mv config.json.backup config.json
+
 sync:
 	@echo "🚀 Spouštím synchronizaci..."
 	@.venv/bin/python sync_pohoda_to_bigquery.py
+
+sync-full:
+	@echo "🚀 Spouštím synchronizaci (FULL mode)..."
+	@echo "⚙️  Dočasně nastavuji mode na 'full'..."
+	@cp config.json config.json.backup
+	@sed 's/"mode": "[^"]*"/"mode": "full"/g' config.json > config.json.tmp && mv config.json.tmp config.json
+	@.venv/bin/python sync_pohoda_to_bigquery.py
+	@mv config.json.backup config.json
+
+sync-inc:
+	@echo "🚀 Spouštím synchronizaci (INCREMENTAL mode)..."
+	@echo "⚙️  Dočasně nastavuji mode na 'incremental'..."
+	@cp config.json config.json.backup
+	@sed 's/"mode": "[^"]*"/"mode": "incremental"/g' config.json > config.json.tmp && mv config.json.tmp config.json
+	@.venv/bin/python sync_pohoda_to_bigquery.py
+	@mv config.json.backup config.json
 
 status:
 	@.venv/bin/python check_status.py
