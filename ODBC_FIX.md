@@ -17,11 +17,20 @@ make install-odbc
 make install-odbc-alt
 ```
 
-### 3. Manuální instalace
+### 3. Manuální instalace pro Debian 12
 ```bash
-sudo ./install_odbc.sh
-# nebo pro Debian 12
-sudo ./install_odbc_alternative.sh
+# 1. Vyčistěte repository
+sudo ./clean_repo.sh
+
+# 2. Nainstalujte závislosti
+sudo apt-get install -y unixodbc unixodbc-dev odbcinst wget curl
+
+# 3. Stáhněte a nainstalujte ODBC driver
+wget https://packages.microsoft.com/debian/11/prod/pool/main/m/msodbcsql18/msodbcsql18_18.4.1.1-1_amd64.deb
+sudo ACCEPT_EULA=Y dpkg -i msodbcsql18_18.4.1.1-1_amd64.deb
+
+# 4. Dokončete instalaci
+make finish-odbc
 ```
 
 ### 4. Diagnostika problému

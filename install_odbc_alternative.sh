@@ -44,7 +44,7 @@ if [[ $OS == *"Ubuntu"* ]] || [[ $OS == *"Debian"* ]]; then
     
     # Instalace základních závislostí
     echo "📦 Instalace základních závislostí..."
-    sudo apt-get install -y curl wget gnupg2 apt-transport-https unixodbc-dev
+    sudo apt-get install -y curl wget gnupg2 apt-transport-https unixodbc unixodbc-dev odbcinst
     
     # Detekce architektury
     ARCH=$(dpkg --print-architecture)

@@ -1,4 +1,4 @@
-.PHONY: help install install-odbc install-odbc-alt config test-conn test-sync sync status logs clean diagnose
+.PHONY: help install install-odbc install-odbc-alt finish-odbc config test-conn test-sync sync status logs clean diagnose
 
 # Výchozí cíl
 help:
@@ -7,6 +7,7 @@ help:
 	@echo "🔧 Instalace:"
 	@echo "  make install-odbc     - Instalace ODBC Driver (vyžaduje sudo)"
 	@echo "  make install-odbc-alt - Alternativní instalace ODBC (pro Debian 12)"
+	@echo "  make finish-odbc      - Dokončení ODBC instalace (po manuálním stažení)"
 	@echo "  make install          - Instalace závislostí do venv"
 	@echo ""
 	@echo "⚙️  Konfigurace:"
@@ -29,10 +30,11 @@ help:
 	@echo ""
 	@echo "🚀 Rychlý start na novém serveru:"
 	@echo "  1. make install-odbc (nebo install-odbc-alt pro Debian 12)"
-	@echo "  2. make install"
-	@echo "  3. make config"
-	@echo "  4. make test-conn"
-	@echo "  5. make test-sync"
+	@echo "  2. make finish-odbc (pokud manuální instalace)"
+	@echo "  3. make install"
+	@echo "  4. make config"
+	@echo "  5. make test-conn"
+	@echo "  6. make test-sync"
 	@echo ""
 
 install-odbc:
@@ -45,6 +47,11 @@ install-odbc-alt:
 	@echo "⚠️  Tento příkaz vyžaduje sudo práva!"
 	@echo "💡 Použije přímé stažení .deb balíčků"
 	@./install_odbc_alternative.sh
+
+finish-odbc:
+	@echo "🔧 Dokončení ODBC instalace..."
+	@echo "⚠️  Tento příkaz vyžaduje sudo práva!"
+	@sudo ./finish_odbc_install.sh
 
 install:
 	@echo "📦 Instalace závislostí..."
