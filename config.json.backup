@@ -21,10 +21,12 @@
       "FA.sql",
       "PH.sql",
       "SKPP.sql",
-      "SKPV.sql"
+      "SKPV.sql",
+      "SKz.sql"
     ],
     "days_back": 7,
-    "full_sync_days_back": 4000
+    "full_sync_days_back": 4000,
+    "full_refresh_tables": ["SKz"]
   },
   "logging": {
     "log_file": "sync.log",

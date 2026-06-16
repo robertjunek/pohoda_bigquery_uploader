@@ -339,6 +339,7 @@ class PohodaBigQuerySync:
             'PH', 'PHpol',
             'SKPP', 'SKPPpol',
             'SKPV', 'SKPVpol',
+            'SKz',
             'sStr', 'sCin', 'AD', 'sZeme', 'sSklad',
             'sFormUh', 'Kasa'
         ]
@@ -877,11 +878,19 @@ class PohodaBigQuerySync:
         """
         try:
             table_name = Path(sql_file).stem  # Název bez přípony
-            
+
+            # Tabulky, které se vždy nahrávají celé (full refresh),
+            # i v incremental režimu - např. nemají sloupec ID pro MERGE.
+            full_refresh_tables = self.config['sync'].get('full_refresh_tables', [])
+            force_full_refresh = table_name in full_refresh_tables
+
             self.logger.info(f"\n{'='*60}")
             self.logger.info(f"Synchronizace tabulky: {table_name} (mode: {self.sync_mode})")
             self.logger.info(f"{'='*60}")
-            
+
+            if force_full_refresh:
+                self.logger.info(f"Tabulka {table_name} je v full_refresh_tables - vždy full load")
+
             # 1. Zjistíme pouze zda tabulka existuje (pro incremental mode)
             sync_info = self.get_last_sync_info(table_name)
             
@@ -901,7 +910,7 @@ class PohodaBigQuerySync:
             df = self.fetch_data_in_batches(sql_query, batch_size)
             
             # 4. Nahrání podle sync mode
-            if self.sync_mode == 'incremental' and sync_info and sync_info.get('exists'):
+            if self.sync_mode == 'incremental' and sync_info and sync_info.get('exists') and not force_full_refresh:
                 # Incremental sync - MERGE (UPSERT podle ID)
                 self.upload_with_merge(df, table_name, batch_size)
             else:
