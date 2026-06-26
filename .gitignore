@@ -2,6 +2,8 @@
 config.json
 pohoda_bigquery_uploader.json
 credentials.json
+config.json.cz.bak
+config.json.sk.bak
 
 # Logs
 *.log

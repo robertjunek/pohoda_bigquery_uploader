@@ -1,4 +1,6 @@
-.PHONY: help install install-odbc install-odbc-alt finish-odbc config test-conn test-sync test-sync-incremental test-sync-full sync sync-incremental sync-full status logs clean diagnose
+.PHONY: help install install-odbc install-odbc-alt finish-odbc config test-conn test run backfill backfill-db status logs logs-tail logs-errors clean diagnose
+
+PY := .venv/bin/python
 
 # Výchozí cíl
 help:
@@ -15,13 +17,13 @@ help:
 	@echo "  make test-conn    - Test připojení k databázím"
 	@echo "  make diagnose     - Diagnostika ODBC problémů"
 	@echo ""
+	@echo "🧪 Testy:"
+	@echo "  make test         - Spuštění unit testů (pytest, bez živých připojení)"
+	@echo ""
 	@echo "🚀 Spouštění:"
-	@echo "  make test-sync      - Testovací spuštění synchronizace (current mode)"
-	@echo "  make test-sync-full - Testovací spuštění (full mode)"
-	@echo "  make test-sync-inc  - Testovací spuštění (incremental mode)"
-	@echo "  make sync           - Spuštění synchronizace (current mode)"
-	@echo "  make sync-full      - Spuštění (full mode)"
-	@echo "  make sync-inc       - Spuštění (incremental mode)"
+	@echo "  make run                  - Synchronizace aktuálních dat (všechny bloky)"
+	@echo "  make backfill             - Backfill historie (current zpracován poslední)"
+	@echo "  make backfill-db DB=<db>  - Backfill jedné konkrétní databáze"
 	@echo ""
 	@echo "📊 Monitoring:"
 	@echo "  make status       - Zobrazení stavu poslední synchronizace"
@@ -31,14 +33,6 @@ help:
 	@echo ""
 	@echo "🧹 Údržba:"
 	@echo "  make clean        - Vyčištění logů a cache"
-	@echo ""
-	@echo "🚀 Rychlý start na novém serveru:"
-	@echo "  1. make install-odbc (nebo install-odbc-alt pro Debian 12)"
-	@echo "  2. make finish-odbc (pokud manuální instalace)"
-	@echo "  3. make install"
-	@echo "  4. make config"
-	@echo "  5. make test-conn"
-	@echo "  6. make test-sync"
 	@echo ""
 
 install-odbc:
@@ -59,58 +53,35 @@ finish-odbc:
 
 install:
 	@echo "📦 Instalace závislostí..."
-	@.venv/bin/pip install -r requirements.txt
+	@$(PY) -m pip install -r requirements.txt
 
 config:
 	@echo "⚙️  Konfigurace..."
-	@.venv/bin/python setup_config.py
+	@$(PY) setup_config.py
 
 test-conn:
 	@echo "🔌 Test připojení..."
-	@.venv/bin/python test_connections.py
+	@$(PY) test_connections.py
 
-test-sync:
-	@echo "🧪 Testovací synchronizace..."
-	@./test_sync.sh
+test:
+	@echo "🧪 Unit testy..."
+	@$(PY) -m pytest -q
 
-test-sync-full:
-	@echo "🧪 Testovací synchronizace (FULL mode)..."
-	@echo "⚙️  Dočasně nastavuji mode na 'full'..."
-	@cp config.json config.json.backup
-	@sed 's/"mode": "[^"]*"/"mode": "full"/g' config.json > config.json.tmp && mv config.json.tmp config.json
-	@./test_sync.sh
-	@mv config.json.backup config.json
+run:
+	@echo "🚀 Synchronizace aktuálních dat..."
+	@$(PY) sync_pohoda_to_bigquery.py
 
-test-sync-inc:
-	@echo "🧪 Testovací synchronizace (INCREMENTAL mode)..."
-	@echo "⚙️  Dočasně nastavuji mode na 'incremental'..."
-	@cp config.json config.json.backup
-	@sed 's/"mode": "[^"]*"/"mode": "incremental"/g' config.json > config.json.tmp && mv config.json.tmp config.json
-	@./test_sync.sh
-	@mv config.json.backup config.json
+backfill:
+	@echo "🕰️  Backfill historie (current poslední)..."
+	@$(PY) sync_pohoda_to_bigquery.py --backfill
 
-sync:
-	@echo "🚀 Spouštím synchronizaci..."
-	@.venv/bin/python sync_pohoda_to_bigquery.py
-
-sync-full:
-	@echo "🚀 Spouštím synchronizaci (FULL mode)..."
-	@echo "⚙️  Dočasně nastavuji mode na 'full'..."
-	@cp config.json config.json.backup
-	@sed 's/"mode": "[^"]*"/"mode": "full"/g' config.json > config.json.tmp && mv config.json.tmp config.json
-	@.venv/bin/python sync_pohoda_to_bigquery.py
-	@mv config.json.backup config.json
-
-sync-inc:
-	@echo "🚀 Spouštím synchronizaci (INCREMENTAL mode)..."
-	@echo "⚙️  Dočasně nastavuji mode na 'incremental'..."
-	@cp config.json config.json.backup
-	@sed 's/"mode": "[^"]*"/"mode": "incremental"/g' config.json > config.json.tmp && mv config.json.tmp config.json
-	@.venv/bin/python sync_pohoda_to_bigquery.py
-	@mv config.json.backup config.json
+backfill-db:
+	@if [ -z "$(DB)" ]; then echo "❌ Použij: make backfill-db DB=nazev_databaze"; exit 1; fi
+	@echo "🕰️  Backfill databáze $(DB)..."
+	@$(PY) sync_pohoda_to_bigquery.py --backfill --database $(DB)
 
 status:
-	@.venv/bin/python check_status.py
+	@$(PY) check_status.py
 
 logs:
 	@echo "📜 Živé sledování logů (Ctrl+C pro ukončení)..."

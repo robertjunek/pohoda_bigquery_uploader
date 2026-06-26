@@ -44,6 +44,6 @@ LEFT JOIN sStr str  ON str.ID = COALESCE(NULLIF(r.RefStr, 0), NULLIF(h.RefStr, 0
 LEFT JOIN sCin cin  ON cin.ID = COALESCE(NULLIF(r.RefCin, 0), NULLIF(h.RefCin, 0))
 LEFT JOIN AD ad     ON ad.ID = h.RefAD
 LEFT JOIN sZeme zem ON zem.ID = ad.RefZeme
-WHERE r.Kod IS NOT NULL
-AND COALESCE(h.DatSave, h.DatCreate ) >= GETDATE() - <DAYS_BACK>
+WHERE COALESCE(h.DatSave, h.DatCreate ) >= GETDATE() - <DAYS_BACK>
+-- AND r.Kod IS NOT NULL
 ;

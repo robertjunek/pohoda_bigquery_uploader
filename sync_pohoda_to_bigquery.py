@@ -1,1043 +1,558 @@
 #!/usr/bin/env python3
 """
-Skript pro synchronizaci dat z MS SQL (Pohoda) do Google BigQuery.
-Stahuje data po dávkách a nahrává je do BigQuery.
+Synchronizace dat z MS SQL (Pohoda) do Google BigQuery.
+
+Logika:
+- Config je POLE nezávislých bloků; každý blok má vlastní MSSQL/BQ připojení,
+  seznam databází (current + history) a seznam dotazů. Bloky se spouští samostatně.
+- Pro každou databázi se spustí každý SQL dotaz a výsledek se streamuje po malých
+  dávkách (fetchmany) přes dočasnou tabulku do cílové BQ tabulky.
+- Mode (full/incremental) se určuje u každého dotazu v configu.
+- Backfill spouští stejné dotazy proti historickým databázím (current je vždy
+  poslední) a NIKDY netruncatuje cílovou tabulku - jen MERGE/append.
 """
 
+import argparse
+import decimal
 import json
 import logging
 import os
 import re
 import sys
-from datetime import datetime
+import uuid
+from datetime import date, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 
 import pandas as pd
 import pyodbc
 import sentry_sdk
 from google.cloud import bigquery
 from google.cloud.exceptions import NotFound
-from sentry_sdk import capture_exception, capture_message
+from sentry_sdk import capture_exception
 
+logger = logging.getLogger("pohoda_sync")
+
+# Sloupce, které se NEpřevádějí na STRING.
+DATE_COLUMNS = {"Datum"}
+NUMERIC_COLUMNS = {"Mnozstvi", "KcJedn", "Kc", "Pocet", "Cena"}
+
+# Tabulky Pohody, které je potřeba prefixovat [linked_server].[database].dbo.
+PREFIX_TABLES = [
+    "FA", "FApol",
+    "PH", "PHpol",
+    "SKPP", "SKPPpol",
+    "SKPV", "SKPVpol",
+    "SKz",
+    "sStr", "sCin", "AD", "sZeme", "sSklad",
+    "sFormUh", "Kasa",
+]
+
+
+# ---------------------------------------------------------------------------
+# Čisté pomocné funkce (testovatelné bez připojení)
+# ---------------------------------------------------------------------------
+
+def load_config(config_path: str) -> List[dict]:
+    """Načte config a vždy vrátí SEZNAM bloků.
+
+    Top-level může být buď pole bloků, nebo (kvůli zpětné kompatibilitě) jeden
+    objekt - ten se zabalí do seznamu o jednom prvku.
+    """
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        print(f"CHYBA: Konfigurační soubor {config_path} nenalezen!")
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"CHYBA: Neplatný JSON v konfiguračním souboru: {e}")
+        sys.exit(1)
+
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list) or not data:
+        print("CHYBA: Config musí být neprázdné pole bloků (nebo jeden objekt).")
+        sys.exit(1)
+    return data
+
+
+def dedupe_columns(columns: List[str]) -> List[str]:
+    """Ošetří duplicitní názvy sloupců (přidá _1, _2, ...)."""
+    seen: Dict[str, int] = {}
+    result = []
+    for col in columns:
+        if col in seen:
+            seen[col] += 1
+            result.append(f"{col}_{seen[col]}")
+        else:
+            seen[col] = 0
+            result.append(col)
+    return result
+
+
+def prepare_sql(sql_content: str, linked_server: str, database: str, days_back: int) -> str:
+    """Přidá prefix k tabulkám a dosadí <DAYS_BACK>.
+
+    Args:
+        sql_content: Obsah SQL souboru.
+        linked_server: Název linked serveru.
+        database: Název Pohoda databáze.
+        days_back: Hodnota dosazená za placeholder <DAYS_BACK>.
+    """
+    prefix = f"[{linked_server}].[{database}].dbo."
+    modified = sql_content
+    for table in PREFIX_TABLES:
+        for kw in ("FROM", "JOIN"):
+            modified = re.sub(
+                rf"\b{kw}\s+{table}\b",
+                f"{kw} {prefix}{table}",
+                modified,
+                flags=re.IGNORECASE,
+            )
+    modified = re.sub(r"<DAYS_BACK>", str(days_back), modified)
+    return modified
+
+
+def build_bq_schema(columns: List[str]) -> List[bigquery.SchemaField]:
+    """Sestaví BQ schéma z názvů sloupců (deterministicky, ne z dat).
+
+    Datum -> TIMESTAMP, množství/ceny -> FLOAT64, zbytek -> STRING.
+    """
+    schema = []
+    for col in columns:
+        # base name bez sufixu z dedupe (Datum_1 atd.)
+        base = re.sub(r"_\d+$", "", col)
+        if base in DATE_COLUMNS:
+            field_type = "TIMESTAMP"
+        elif base in NUMERIC_COLUMNS:
+            field_type = "FLOAT64"
+        else:
+            field_type = "STRING"
+        schema.append(bigquery.SchemaField(col, field_type, mode="NULLABLE"))
+    return schema
+
+
+def _convert_value_to_string(val):
+    if val is None or (not isinstance(val, (list, dict)) and pd.isna(val)):
+        return None
+    if isinstance(val, bytes):
+        # GUID z SQL Serveru
+        try:
+            return str(uuid.UUID(bytes_le=val))
+        except Exception:
+            return val.hex()
+    if isinstance(val, datetime):
+        return val.strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(val, date):
+        return val.strftime("%Y-%m-%d")
+    if isinstance(val, decimal.Decimal):
+        return str(val)
+    return str(val)
+
+
+def _convert_value_to_float(val, col):
+    if val is None or pd.isna(val):
+        return None
+    if isinstance(val, decimal.Decimal):
+        return float(val)
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        logger.warning(f"Nelze převést na float: {val} v sloupci {col}")
+        return None
+
+
+def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Připraví DataFrame pro BigQuery (typy + NULL + bytes/Decimal)."""
+    df = df.copy()
+    df.columns = dedupe_columns(list(df.columns))
+
+    for col in df.columns:
+        base = re.sub(r"_\d+$", "", col)
+        try:
+            if base in DATE_COLUMNS:
+                df[col] = pd.to_datetime(df[col], errors="coerce")
+                df[col] = df[col].where(pd.notna(df[col]), None)
+            elif base in NUMERIC_COLUMNS:
+                df[col] = df[col].apply(lambda v: _convert_value_to_float(v, col))
+            else:
+                df[col] = df[col].apply(_convert_value_to_string)
+        except Exception as e:
+            logger.warning(f"Problém s převodem sloupce {col}: {e}, převádím na string")
+            try:
+                df[col] = df[col].astype(str).replace("nan", None).replace("None", None)
+            except Exception:
+                df[col] = None
+    return df
+
+
+def databases_to_process(
+    databases_cfg: dict, backfill: bool, database_filter: Optional[str] = None
+) -> List[dict]:
+    """Vrátí seznam databází ke zpracování ve správném pořadí.
+
+    - normální běh: jen current
+    - backfill: historie v pořadí ze configu, current VŽDY poslední
+    - database_filter: omezí na databázi daného jména (z current i history)
+    """
+    current = databases_cfg["current"]
+    history = databases_cfg.get("history", []) if backfill else []
+
+    if backfill:
+        ordered = list(history) + [current]
+    else:
+        ordered = [current]
+
+    if database_filter:
+        ordered = [db for db in ordered if db.get("database") == database_filter]
+
+    return ordered
+
+
+def build_finalize_statements(
+    mode: str, backfill: bool, target_id: str, temp_id: str, key: str, columns: List[str]
+) -> List[str]:
+    """Sestaví SQL příkazy pro finalizaci (z temp tabulky do cílové).
+
+    - normální + full: CREATE OR REPLACE TABLE target AS SELECT * FROM temp
+    - incremental (i backfill): MERGE podle key
+    - backfill + full: append (INSERT INTO target SELECT * FROM temp)
+    """
+    if mode == "full" and not backfill:
+        return [f"CREATE OR REPLACE TABLE `{target_id}` AS SELECT * FROM `{temp_id}`"]
+
+    ensure = f"CREATE TABLE IF NOT EXISTS `{target_id}` LIKE `{temp_id}`"
+
+    if mode == "incremental":
+        non_key = [c for c in columns if c != key]
+        set_clause = ", ".join(f"T.`{c}` = S.`{c}`" for c in non_key)
+        insert_cols = ", ".join(f"`{c}`" for c in columns)
+        insert_vals = ", ".join(f"S.`{c}`" for c in columns)
+        merge = f"""
+            MERGE `{target_id}` T
+            USING `{temp_id}` S
+            ON T.`{key}` = S.`{key}`
+            WHEN MATCHED THEN UPDATE SET {set_clause}
+            WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})
+        """.strip()
+        return [ensure, merge]
+
+    # backfill + full -> append
+    return [ensure, f"INSERT INTO `{target_id}` SELECT * FROM `{temp_id}`"]
+
+
+# ---------------------------------------------------------------------------
+# Hlavní třída - jeden config blok
+# ---------------------------------------------------------------------------
 
 class PohodaBigQuerySync:
-    """Třída pro synchronizaci dat z Pohoda do BigQuery."""
+    """Synchronizace pro JEDEN config blok."""
 
-    def __init__(self, config_path: str = "config.json"):
-        """
-        Inicializace synchronizátoru.
-        
-        Args:
-            config_path: Cesta ke konfiguračnímu souboru
-        """
-        self.config = self._load_config(config_path)
-        self._setup_logging()
-        self._setup_sentry()
-        
+    def __init__(self, config: dict):
+        self.config = config
+        self.name = config.get("name", "default")
         self.mssql_conn = None
         self.bq_client = None
-        self.linked_server = None
-        self.pohoda_database = None
-        self.sync_mode = self.config['sync'].get('mode', 'full')
 
-    def _load_config(self, config_path: str) -> dict:
-        """Načtení konfigurace ze souboru."""
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            print(f"CHYBA: Konfigurační soubor {config_path} nenalezen!")
-            sys.exit(1)
-        except json.JSONDecodeError as e:
-            print(f"CHYBA: Neplatný JSON v konfiguračním souboru: {e}")
-            sys.exit(1)
-
-    def _setup_logging(self):
-        """Nastavení logování do souboru a konzole."""
-        log_config = self.config['logging']
-        
-        # Formatter
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
-        
-        # Root logger
-        logger = logging.getLogger()
-        logger.setLevel(getattr(logging, log_config['log_level']))
-        
-        # File handler s rotací
-        file_handler = RotatingFileHandler(
-            log_config['log_file'],
-            maxBytes=log_config['max_bytes'],
-            backupCount=log_config['backup_count'],
-            encoding='utf-8'
-        )
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-        
-        # Console handler
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setFormatter(formatter)
-        logger.addHandler(console_handler)
-        
-        self.logger = logger
-
-    def _setup_sentry(self):
-        """Nastavení Sentry pro error tracking."""
-        sentry_config = self.config.get('sentry', {})
-        dsn = sentry_config.get('dsn')
-        
-        if dsn and dsn != "your_sentry_dsn_here":
-            try:
-                sentry_sdk.init(
-                    dsn=dsn,
-                    environment=sentry_config.get('environment', 'production'),
-                    traces_sample_rate=sentry_config.get('traces_sample_rate', 0.1)
-                )
-                self.logger.info("Sentry inicializováno úspěšně")
-            except Exception as e:
-                self.logger.warning(f"Nepodařilo se inicializovat Sentry: {e}")
-        else:
-            self.logger.info("Sentry není nakonfigurováno, error tracking vypnut")
+    # --- připojení ---------------------------------------------------------
 
     def connect_mssql(self):
-        """Připojení k MS SQL serveru."""
+        cfg = self.config["mssql"]
+        conn_str = (
+            f"DRIVER={{{cfg['driver']}}};"
+            f"SERVER={cfg['server']};"
+            f"DATABASE={cfg['database']};"
+            f"UID={cfg['username']};"
+            f"PWD={cfg['password']};"
+            f"Timeout={cfg['timeout']};"
+        )
+        if cfg.get("trust_server_certificate", False):
+            conn_str += "TrustServerCertificate=yes;"
         try:
-            mssql_config = self.config['mssql']
-            
-            connection_string = (
-                f"DRIVER={{{mssql_config['driver']}}};"
-                f"SERVER={mssql_config['server']};"
-                f"DATABASE={mssql_config['database']};"
-                f"UID={mssql_config['username']};"
-                f"PWD={mssql_config['password']};"
-                f"Timeout={mssql_config['timeout']};"
-            )
-            
-            # Přidání TrustServerCertificate pokud je v konfiguraci
-            if mssql_config.get('trust_server_certificate', False):
-                connection_string += "TrustServerCertificate=yes;"
-            
-            self.mssql_conn = pyodbc.connect(connection_string)
-            self.logger.info(f"Připojeno k MS SQL serveru: {mssql_config['server']}")
-            
+            self.mssql_conn = pyodbc.connect(conn_str)
+            logger.info(f"[{self.name}] Připojeno k MS SQL: {cfg['server']}")
         except pyodbc.Error as e:
-            self.logger.error(f"Chyba při připojení k MS SQL: {e}")
+            logger.error(f"[{self.name}] Chyba připojení k MS SQL: {e}")
             capture_exception(e)
             raise
 
     def connect_bigquery(self):
-        """Připojení k BigQuery."""
+        cfg = self.config["bigquery"]
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = cfg["credentials_file"]
         try:
-            bq_config = self.config['bigquery']
-            credentials_path = bq_config['credentials_file']
-            
-            # Nastavení proměnné prostředí pro credentials
-            os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = credentials_path
-            
             self.bq_client = bigquery.Client(
-                project=bq_config['project_id'],
-                location=bq_config['location']
+                project=cfg["project_id"], location=cfg["location"]
             )
-            
-            self.logger.info(f"Připojeno k BigQuery projektu: {bq_config['project_id']}")
-            
-            # Ujištění, že dataset existuje
+            logger.info(f"[{self.name}] Připojeno k BigQuery: {cfg['project_id']}")
             self._ensure_dataset_exists()
-            
         except Exception as e:
-            self.logger.error(f"Chyba při připojení k BigQuery: {e}")
+            logger.error(f"[{self.name}] Chyba připojení k BigQuery: {e}")
             capture_exception(e)
             raise
 
     def _ensure_dataset_exists(self):
-        """Zajistí, že dataset v BigQuery existuje."""
+        cfg = self.config["bigquery"]
+        dataset_ref = f"{cfg['project_id']}.{cfg['dataset']}"
         try:
-            dataset_id = self.config['bigquery']['dataset']
-            dataset_ref = f"{self.config['bigquery']['project_id']}.{dataset_id}"
-            
+            self.bq_client.get_dataset(dataset_ref)
+        except NotFound:
+            dataset = bigquery.Dataset(dataset_ref)
+            dataset.location = cfg["location"]
+            self.bq_client.create_dataset(dataset, timeout=30)
+            logger.info(f"[{self.name}] Dataset {cfg['dataset']} vytvořen")
+
+    def close(self):
+        if self.mssql_conn:
             try:
-                self.bq_client.get_dataset(dataset_ref)
-                self.logger.info(f"Dataset {dataset_id} již existuje")
-            except NotFound:
-                # Dataset neexistuje, vytvoříme ho
-                dataset = bigquery.Dataset(dataset_ref)
-                dataset.location = self.config['bigquery']['location']
-                dataset = self.bq_client.create_dataset(dataset, timeout=30)
-                self.logger.info(f"Dataset {dataset_id} vytvořen")
-                
-        except Exception as e:
-            self.logger.error(f"Chyba při kontrole/vytváření datasetu: {e}")
-            capture_exception(e)
-            raise
-
-    def _ensure_sync_metadata_table(self):
-        """Zajistí, že existuje tabulka pro tracking synchronizace."""
-        try:
-            dataset_id = self.config['bigquery']['dataset']
-            project_id = self.config['bigquery']['project_id']
-            table_id = f"{project_id}.{dataset_id}._sync_metadata"
-            
-            # Zkontrolujeme, zda tabulka existuje
-            try:
-                self.bq_client.get_table(table_id)
-                self.logger.debug("Metadata tabulka už existuje")
-                return
-            except NotFound:
-                pass
-            
-            # Vytvoříme metadata tabulku
-            schema = [
-                bigquery.SchemaField("table_name", "STRING", mode="REQUIRED"),
-                bigquery.SchemaField("last_sync_timestamp", "TIMESTAMP"),
-                bigquery.SchemaField("last_max_date", "DATE"),
-                bigquery.SchemaField("records_synced", "INTEGER"),
-                bigquery.SchemaField("sync_mode", "STRING"),
-                bigquery.SchemaField("created_at", "TIMESTAMP"),
-                bigquery.SchemaField("updated_at", "TIMESTAMP"),
-            ]
-            
-            table = bigquery.Table(table_id, schema=schema)
-            table = self.bq_client.create_table(table)
-            self.logger.info("Metadata tabulka _sync_metadata vytvořena")
-            
-        except Exception as e:
-            self.logger.error(f"Chyba při vytváření metadata tabulky: {e}")
-            capture_exception(e)
-            raise
-
-    def get_last_sync_info(self, table_name: str) -> dict:
-        """
-        Zkontroluje, zda tabulka v BigQuery existuje.
-        NEPOUŽÍVÁ metadata tabulku - pouze kontroluje existenci.
-        
-        Returns:
-            dict: {'exists': bool}
-        """
-        try:
-            dataset_id = self.config['bigquery']['dataset']
-            project_id = self.config['bigquery']['project_id']
-            table_id = f"{project_id}.{dataset_id}.{table_name}"
-            
-            # Zkontrolujeme, zda hlavní tabulka existuje
-            table_exists = True
-            try:
-                self.bq_client.get_table(table_id)
-            except NotFound:
-                table_exists = False
-                
-            return {
-                'exists': table_exists
-            }
-            
-        except Exception as e:
-            self.logger.warning(f"Chyba při získávání info o tabulce {table_name}: {e}")
-            return {
-                'exists': False
-            }
-
-    def update_sync_metadata(self, table_name: str, records_count: int, max_date):
-        """Aktualizuje metadata o synchronizaci."""
-        try:
-            dataset_id = self.config['bigquery']['dataset']
-            project_id = self.config['bigquery']['project_id']
-            metadata_table_id = f"{project_id}.{dataset_id}._sync_metadata"
-            
-            # Bezpečné formátování data
-            if hasattr(max_date, 'strftime'):
-                date_str = max_date.strftime('%Y-%m-%d')
-            else:
-                date_str = str(max_date)
-            
-            # MERGE metadata
-            merge_query = f"""
-                MERGE `{metadata_table_id}` T
-                USING (
-                    SELECT 
-                        '{table_name}' as table_name,
-                        CURRENT_TIMESTAMP() as last_sync_timestamp,
-                        CAST('{date_str}' AS DATE) as last_max_date,
-                        {records_count} as records_synced,
-                        '{self.sync_mode}' as sync_mode,
-                        CURRENT_TIMESTAMP() as created_at,
-                        CURRENT_TIMESTAMP() as updated_at
-                ) S
-                ON T.table_name = S.table_name
-                WHEN MATCHED THEN UPDATE SET
-                    last_sync_timestamp = S.last_sync_timestamp,
-                    last_max_date = S.last_max_date,
-                    records_synced = S.records_synced,
-                    sync_mode = S.sync_mode,
-                    updated_at = S.updated_at
-                WHEN NOT MATCHED THEN INSERT VALUES(
-                    S.table_name, S.last_sync_timestamp, S.last_max_date,
-                    S.records_synced, S.sync_mode, S.created_at, S.updated_at
-                )
-            """
-            
-            self.bq_client.query(merge_query).result()
-            self.logger.debug(f"Metadata aktualizovány pro {table_name}")
-            
-        except Exception as e:
-            self.logger.warning(f"Chyba při aktualizaci metadata pro {table_name}: {e}")
-
-    def get_pohoda_connection_info(self) -> Tuple[str, str]:
-        """
-        Získání informací o linked serveru a databázi.
-        
-        Returns:
-            Tuple[linked_server, database]
-        """
-        try:
-            # Volitelný override z konfigurace - umožní zacílit na konkrétní
-            # POHODA databázi bez přepínání hodnoty v tabulce companies (picking DB).
-            # Použij např. pro jednorázový backfill historie jiné firmy.
-            override = self.config.get('pohoda_override') or {}
-            if override.get('linked_server') and override.get('database'):
-                self.linked_server = override['linked_server']
-                self.pohoda_database = override['database']
-                self.logger.info(
-                    f"Pohoda connection (OVERRIDE z config): "
-                    f"linked_server={self.linked_server}, "
-                    f"database={self.pohoda_database}"
-                )
-                return self.linked_server, self.pohoda_database
-
-            query = "SELECT TOP 1 linked_server, [database] FROM companies"
-
-            cursor = self.mssql_conn.cursor()
-            cursor.execute(query)
-            row = cursor.fetchone()
-            cursor.close()
-            
-            if not row:
-                raise ValueError("Tabulka companies neobsahuje žádné záznamy")
-            
-            self.linked_server = row.linked_server
-            self.pohoda_database = row.database
-            
-            self.logger.info(
-                f"Pohoda connection: linked_server={self.linked_server}, "
-                f"database={self.pohoda_database}"
-            )
-            
-            return self.linked_server, self.pohoda_database
-            
-        except Exception as e:
-            self.logger.error(f"Chyba při získávání connection info: {e}")
-            capture_exception(e)
-            raise
-
-    def _add_table_prefix(self, sql_content: str, sync_info: dict = None, table_name: str = None) -> str:
-        """
-        Přidá prefix ke všem tabulkám v SQL dotazu.
-        IGNORUJE metadata - používá pouze days_back z konfigurace.
-        
-        Args:
-            sql_content: Obsah SQL souboru
-            sync_info: Informace o tabulce (nepoužívá se pro datum)
-            table_name: Název tabulky
-            
-        Returns:
-            Upravený SQL dotaz s prefixy
-        """
-        # Prefix pro tabulky: [linked_server].[database].dbo.
-        prefix = f"[{self.linked_server}].[{self.pohoda_database}].dbo."
-        
-        # Seznam tabulek, které potřebujeme prefixovat
-        tables = [
-            'FA', 'FApol',
-            'PH', 'PHpol',
-            'SKPP', 'SKPPpol',
-            'SKPV', 'SKPVpol',
-            'SKz',
-            'sStr', 'sCin', 'AD', 'sZeme', 'sSklad',
-            'sFormUh', 'Kasa'
-        ]
-        
-        modified_sql = sql_content
-        
-        # Regex pattern pro nalezení tabulek (FROM/JOIN table)
-        for table in tables:
-            # Pattern pro FROM/JOIN následovaný názvem tabulky
-            patterns = [
-                (rf'\bFROM\s+{table}\b', f'FROM {prefix}{table}'),
-                (rf'\bJOIN\s+{table}\b', f'JOIN {prefix}{table}'),
-            ]
-            
-            for pattern, replacement in patterns:
-                modified_sql = re.sub(
-                    pattern,
-                    replacement,
-                    modified_sql,
-                    flags=re.IGNORECASE
-                )
-
-        # Určení days_back podle sync mode - IGNORUJEME metadata
-        if self.sync_mode == 'full':
-            days_back = self.config['sync'].get('full_sync_days_back', 
-                                              self.config['sync'].get('days_back', 14))
-            self.logger.info(f"Full load pro {table_name} - days_back: {days_back}")
-        else:
-            # Incremental - také používá days_back
-            days_back = self.config['sync'].get('days_back', 7)
-            self.logger.info(f"Incremental load pro {table_name} - days_back: {days_back}")
-
-        # Nahrazení placeholderu <DAYS_BACK>
-        modified_sql = re.sub(r'<DAYS_BACK>', str(days_back), modified_sql)
-        
-        return modified_sql
-
-    
-
-    def load_and_prepare_sql(self, sql_file: str, sync_info: dict = None) -> str:
-        """
-        Načte SQL soubor a přidá prefixy k tabulkám.
-        
-        Args:
-            sql_file: Název SQL souboru
-            sync_info: Informace o poslední synchronizaci
-            
-        Returns:
-            Upravený SQL dotaz
-        """
-        try:
-            sql_path = Path(sql_file)
-            
-            if not sql_path.exists():
-                raise FileNotFoundError(f"SQL soubor {sql_file} nenalezen")
-            
-            with open(sql_path, 'r', encoding='utf-8') as f:
-                sql_content = f.read()
-            
-            # Přidání prefixů a incremental logiky
-            table_name = sql_path.stem
-            modified_sql = self._add_table_prefix(sql_content, sync_info, table_name)
-            
-            self.logger.debug(f"SQL dotaz připraven z {sql_file}")
-            return modified_sql
-            
-        except Exception as e:
-            self.logger.error(f"Chyba při načítání SQL souboru {sql_file}: {e}")
-            capture_exception(e)
-            raise
-
-    def fetch_data_in_batches(self, sql_query: str, batch_size: int) -> pd.DataFrame:
-        """
-        Stáhne všechna data z databáze.
-        
-        Args:
-            sql_query: SQL dotaz
-            batch_size: Velikost dávky (pro informaci)
-            
-        Returns:
-            DataFrame se všemi daty
-        """
-        try:
-            self.logger.info(f"Stahuji data z MS SQL (batch size: {batch_size})...")
-            
-            # Použití pyodbc cursor s manuálním načtením pro lepší kontrolu
-            cursor = self.mssql_conn.cursor()
-            cursor.execute(sql_query)
-            
-            # Získání názvů sloupců a jejich typů
-            columns = [desc[0] for desc in cursor.description]
-            col_types = [desc[1] for desc in cursor.description]
-            
-            # Logování typů sloupců pro debugging
-            for col, col_type in zip(columns, col_types):
-                self.logger.debug(f"Sloupec {col}: type={col_type}")
-            
-            # Načtení všech dat
-            rows = cursor.fetchall()
-            cursor.close()
-            
-            # Vytvoření DataFrame
-            df = pd.DataFrame.from_records(rows, columns=columns)
-            
-            # Diagnostic: kontrola typů v DataFrame (použijeme df.columns místo columns, kvůli duplicitám)
-            for col in df.columns:
-                if len(df) > 0:
-                    try:
-                        col_data = df[col]
-                        sample_val = col_data.dropna().iloc[0] if len(col_data.dropna()) > 0 else None
-                        if sample_val is not None:
-                            self.logger.debug(f"DF sloupec {col}: dtype={col_data.dtype}, sample type={type(sample_val)}, sample={sample_val}")
-                    except Exception as e:
-                        self.logger.debug(f"DF sloupec {col}: error getting sample - {e}")
-            
-            self.logger.info(f"Staženo {len(df)} záznamů")
-            return df
-            
-        except Exception as e:
-            self.logger.error(f"Chyba při stahování dat: {e}")
-            capture_exception(e)
-            raise
-
-    def _prepare_dataframe_for_bigquery(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Připraví DataFrame pro nahrání do BigQuery.
-        Ošetří NULL hodnoty a datové typy a duplicitní sloupce.
-        VŠECHNY sloupce kromě Datum, množství a cen jsou STRING.
-        
-        Args:
-            df: Původní DataFrame
-            
-        Returns:
-            Upravený DataFrame
-        """
-        import decimal
-        import datetime
-        
-        df = df.copy()
-        
-        # Ošetření duplicitních názvů sloupců
-        cols = list(df.columns)
-        seen = {}
-        for i, col in enumerate(cols):
-            if col in seen:
-                # Duplicitní sloupec - přidáme číslo
-                seen[col] += 1
-                cols[i] = f"{col}_{seen[col]}"
-            else:
-                seen[col] = 0
-        df.columns = cols
-        
-        # Sloupce, které můžou být numerické (množství a ceny)
-        numeric_columns = {'Mnozstvi', 'KcJedn', 'Kc', 'Pocet', 'Cena'}
-        
-        # Ošetření datových typů a NULL hodnot
-        for col in df.columns:
-            try:
-                # Datum - převést na pandas datetime
-                if col == 'Datum':
-                    self.logger.debug(f"Sloupec {col} - převádím na datetime")
-                    df[col] = pd.to_datetime(df[col])
-                    df[col] = df[col].where(pd.notna(df[col]), None)
-                    continue
-                
-                # Množství a ceny - převést na float
-                if col in numeric_columns:
-                    self.logger.debug(f"Sloupec {col} - převádím na float")
-                    
-                    def convert_to_float(val):
-                        if val is None or pd.isna(val):
-                            return None
-                        if isinstance(val, decimal.Decimal):
-                            return float(val)
-                        try:
-                            return float(val)
-                        except (ValueError, TypeError):
-                            self.logger.warning(f"Nelze převést na float: {val} v sloupci {col}")
-                            return None
-                    
-                    df[col] = df[col].apply(convert_to_float)
-                    continue
-                
-                # VŠECHNY OSTATNÍ SLOUPCE - převést na STRING
-                self.logger.debug(f"Sloupec {col} - převádím na string")
-                
-                def convert_to_string(val):
-                    if val is None or pd.isna(val):
-                        return None
-                    if isinstance(val, bytes):
-                        # GUID z SQL Serveru
-                        try:
-                            import uuid
-                            return str(uuid.UUID(bytes_le=val))
-                        except Exception:
-                            return val.hex()
-                    if isinstance(val, (datetime.date, datetime.datetime)):
-                        return val.strftime('%Y-%m-%d %H:%M:%S') if isinstance(val, datetime.datetime) else val.strftime('%Y-%m-%d')
-                    if isinstance(val, decimal.Decimal):
-                        return str(val)
-                    # Vše ostatní jako string
-                    return str(val)
-                
-                df[col] = df[col].apply(convert_to_string)
-                        
+                self.mssql_conn.close()
             except Exception as e:
-                self.logger.warning(f"Problém s převodem sloupce {col}: {e}, převádím na string")
-                # Pokud selže cokoliv, převeď sloupec na string
-                try:
-                    df[col] = df[col].astype(str).replace('nan', None).replace('None', None)
-                except:
-                    df[col] = None
-        
-        return df
-
-    def _get_bigquery_schema_from_dataframe(self, df: pd.DataFrame) -> list:
-        """
-        Vytvoří BigQuery schéma z DataFrame s bezpečnými typy.
-        Všechny sloupce kromě Datum, množství a cen jsou STRING.
-        
-        Args:
-            df: DataFrame pro analýzu
-            
-        Returns:
-            Seznam BigQuery SchemaField objektů
-        """
-        schema = []
-        
-        # Sloupce, které můžou být numerické (množství a ceny)
-        numeric_columns = {'Mnozstvi', 'KcJedn', 'Kc', 'Pocet', 'Cena'}
-        
-        for col in df.columns:
-            # Automatická detekce typu podle pandas dtype
-            dtype_str = str(df[col].dtype)
-            
-            if col == 'Datum' and ('datetime' in dtype_str or 'timestamp' in dtype_str):
-                # Datum jako TIMESTAMP
-                field_type = "TIMESTAMP"
-            elif col in numeric_columns:
-                # Množství a ceny jako FLOAT64
-                field_type = "FLOAT64"
-            else:
-                # VŠE OSTATNÍ jako STRING (včetně ID, RefCin, RefStr, atd.)
-                field_type = "STRING"
-            
-            schema.append(
-                bigquery.SchemaField(
-                    col, 
-                    field_type, 
-                    mode="NULLABLE"  # Všechny sloupce můžou být NULL
-                )
-            )
-        
-        return schema
-
-    def _validate_and_fix_types(self, df: pd.DataFrame, table_name: str, schema: list) -> pd.DataFrame:
-        """
-        Zkontroluje DataFrame proti schématu a zaloguje konkrétní sloupce/ID, které
-        obsahují hodnoty nekonzistentní s očekávaným typem. Nevalidní hodnoty se
-        přepíší na None, aby nahrání do BigQuery nepadalo.
-
-        Args:
-            df: DataFrame ke kontrole
-            table_name: název tabulky (pro logování)
-            schema: seznam bigquery.SchemaField
-
-        Returns:
-            upravený DataFrame
-        """
-        if df is None or len(df) == 0:
-            return df
-
-        df = df.copy()
-
-        # map column -> expected type (STRING, INTEGER, NUMERIC, DATE...)
-        expected = {f.name: f.field_type for f in (schema or [])}
-
-        for col, expected_type in expected.items():
-            if col not in df.columns:
-                continue
-
-            # Only validate numeric-like types
-            if expected_type in ("INTEGER", "NUMERIC"):
-                series = df[col]
-                # Consider non-null samples
-                non_null = series[series.notna()]
-                if non_null.empty:
-                    continue
-
-                # Try coercion to numeric
-                coerced = pd.to_numeric(non_null, errors='coerce')
-                invalid_mask = coerced.isna()
-
-                if invalid_mask.any():
-                    # Collect sample of offending rows (up to 10)
-                    invalid_idx = invalid_mask[invalid_mask].index.tolist()[:10]
-                    samples = []
-                    for idx in invalid_idx:
-                        try:
-                            id_val = df.at[idx, 'ID'] if 'ID' in df.columns else 'N/A'
-                        except Exception:
-                            id_val = 'N/A'
-                        val = df.at[idx, col]
-                        samples.append({'index': idx, 'id': id_val, 'value': val})
-
-                    # Log clear message
-                    self.logger.error(
-                        f"Datatype mismatch in table={table_name} column={col}: "
-                        f"expected={expected_type} but found {len(invalid_mask[invalid_mask])} non-numeric values. "
-                        f"Samples={samples}"
-                    )
-
-                    # Coerce invalids to None to avoid load failure
-                    # Operate on original dataframe indices
-                    for idx in invalid_mask[invalid_mask].index:
-                        # Only if value is not already NaN
-                        try:
-                            if pd.notna(df.at[idx, col]):
-                                df.at[idx, col] = None
-                        except Exception:
-                            df.at[idx, col] = None
-
-                # Finally convert whole column to numeric (nullable)
-                try:
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
-                except Exception:
-                    # If conversion fails, leave as is (None for invalids)
-                    pass
-
-        return df
-
-    def upload_to_bigquery(self, df: pd.DataFrame, table_name: str, batch_size: int):
-        """
-        Nahraje data do BigQuery po dávkách.
-        
-        Args:
-            df: DataFrame s daty
-            table_name: Název tabulky v BigQuery
-            batch_size: Velikost dávky pro nahrávání
-        """
-        try:
-            dataset_id = self.config['bigquery']['dataset']
-            project_id = self.config['bigquery']['project_id']
-            table_id = f"{project_id}.{dataset_id}.{table_name}"
-            
-            total_rows = len(df)
-            
-            if total_rows == 0:
-                self.logger.warning(f"Žádná data k nahrání pro tabulku {table_name}")
-                return
-            
-            # Ošetření NULL hodnot a datových typů
-            df = self._prepare_dataframe_for_bigquery(df)
-            
-            # Dodatečná kontrola na problematické typy
-            for col in df.columns:
-                if df[col].dtype == 'object':
-                    sample = df[col].dropna().head(5)
-                    for idx, val in sample.items():
-                        if isinstance(val, bytes):
-                            self.logger.error(f"CHYBA: Sloupec {col} stále obsahuje bytes po konverzi! row={idx}, val={val[:20]}")
-            
-            self.logger.info(f"Nahrávám {total_rows} záznamů do {table_id}...")
-            
-            # Získání explicitního schématu
-            schema = self._get_bigquery_schema_from_dataframe(df)
-            
-            # Konfigurace pro load job s explicitním schématem
-            job_config = bigquery.LoadJobConfig(
-                write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
-                schema=schema,
-                # Povolíme nekonzistentní types a chybné hodnoty
-                allow_jagged_rows=False,
-                allow_quoted_newlines=True,
-                ignore_unknown_values=True,
-            )
-            
-            # Nahrávání po dávkách
-            uploaded = 0
-            for i in range(0, total_rows, batch_size):
-                batch = df.iloc[i:i + batch_size]
-                
-                # První batch použije WRITE_TRUNCATE, další WRITE_APPEND
-                if i > 0:
-                    job_config.write_disposition = bigquery.WriteDisposition.WRITE_APPEND
-                
-                job = self.bq_client.load_table_from_dataframe(
-                    batch,
-                    table_id,
-                    job_config=job_config
-                )
-                
-                job.result()  # Čekání na dokončení
-                
-                uploaded += len(batch)
-                self.logger.info(
-                    f"Nahráno {uploaded}/{total_rows} záznamů "
-                    f"({uploaded/total_rows*100:.1f}%)"
-                )
-            
-            self.logger.info(f"✓ Tabulka {table_name} úspěšně nahrána do BigQuery")
-            
-        except Exception as e:
-            self.logger.error(f"Chyba při nahrávání do BigQuery: {e}")
-            
-            # Dodatečná diagnostika
-            self.logger.error("Diagnostika DataFrame:")
-            for col in df.columns:
-                try:
-                    sample = df[col].dropna().head(1)
-                    if len(sample) > 0:
-                        val = sample.iloc[0]
-                        self.logger.error(f"  {col}: type={type(val)}, value={val}")
-                except Exception as diag_e:
-                    self.logger.error(f"  {col}: diagnostic error={diag_e}")
-            
-            capture_exception(e)
-            raise
-
-    def upload_with_merge(self, df: pd.DataFrame, table_name: str, batch_size: int):
-        """
-        Nahraje data do BigQuery pomocí MERGE operace pro incremental update.
-        
-        Args:
-            df: DataFrame s daty
-            table_name: Název tabulky v BigQuery  
-            batch_size: Velikost dávky pro nahrávání
-        """
-        try:
-            dataset_id = self.config['bigquery']['dataset']
-            project_id = self.config['bigquery']['project_id']
-            table_id = f"{project_id}.{dataset_id}.{table_name}"
-            temp_table_id = f"{project_id}.{dataset_id}.{table_name}_temp_{int(datetime.now().timestamp())}"
-            
-            total_rows = len(df)
-            
-            if total_rows == 0:
-                self.logger.warning(f"Žádná data k nahrání pro tabulku {table_name}")
-                return
-                
-            # Ošetření DataFrame
-            df = self._prepare_dataframe_for_bigquery(df)
-            
-            self.logger.info(f"Incremental sync - MERGE {total_rows} záznamů do {table_id}")
-            
-            # Získání explicitního schématu
-            schema = self._get_bigquery_schema_from_dataframe(df)
-            
-            # 1. Vytvoření dočasné tabulky a nahrání dat
-            job_config = bigquery.LoadJobConfig(
-                write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
-                schema=schema,
-                ignore_unknown_values=True,
-            )
-            
-            self.logger.info(f"Vytvářím dočasnou tabulku {temp_table_id}...")
-            
-            # Nahrávání do temp tabulky po dávkách
-            uploaded = 0
-            for i in range(0, total_rows, batch_size):
-                batch = df.iloc[i:i + batch_size]
-                
-                if i > 0:
-                    job_config.write_disposition = bigquery.WriteDisposition.WRITE_APPEND
-                
-                job = self.bq_client.load_table_from_dataframe(
-                    batch,
-                    temp_table_id,
-                    job_config=job_config
-                )
-                job.result()
-                
-                uploaded += len(batch)
-                self.logger.info(f"Nahráno do temp: {uploaded}/{total_rows} ({uploaded/total_rows*100:.1f}%)")
-            
-            # 2. MERGE operace
-            self.logger.info(f"Provádím MERGE operaci...")
-            
-            # Získáme schema z temp tabulky pro CREATE
-            temp_table = self.bq_client.get_table(temp_table_id)
-            columns = [field.name for field in temp_table.schema if field.name != 'ID']
-            
-            # Vytvoříme SET klauzuli pro UPDATE (všechny sloupce kromě ID)
-            set_clause = ", ".join([f"T.{col} = S.{col}" for col in columns])
-            
-            merge_query = f"""
-                MERGE `{table_id}` T
-                USING `{temp_table_id}` S
-                ON T.ID = S.ID
-                WHEN MATCHED THEN 
-                    UPDATE SET {set_clause}
-                WHEN NOT MATCHED THEN 
-                    INSERT ({', '.join(['ID'] + columns)})
-                    VALUES ({', '.join(['S.ID'] + [f'S.{col}' for col in columns])})
-            """
-            
-            merge_job = self.bq_client.query(merge_query)
-            merge_result = merge_job.result()
-            
-            # Získáme statistiky MERGE operace
-            if hasattr(merge_job, 'dml_stats') and merge_job.dml_stats:
-                stats = merge_job.dml_stats
-                self.logger.info(
-                    f"MERGE dokončen - "
-                    f"Vloženo: {stats.inserted_row_count}, "
-                    f"Aktualizováno: {stats.updated_row_count}, "
-                    f"Smazáno: {stats.deleted_row_count}"
-                )
-            else:
-                self.logger.info("MERGE operace dokončena")
-            
-            # 3. Smazání dočasné tabulky
-            self.bq_client.delete_table(temp_table_id)
-            self.logger.debug(f"Dočasná tabulka smazána: {temp_table_id}")
-            
-            self.logger.info(f"✓ Incremental sync tabulky {table_name} dokončen")
-            
-        except Exception as e:
-            # Pokus o smazání dočasné tabulky při chybě
+                logger.warning(f"[{self.name}] Chyba při zavírání MS SQL: {e}")
+        if self.bq_client:
             try:
-                self.bq_client.delete_table(temp_table_id)
-            except:
-                pass
-                
-            self.logger.error(f"Chyba při MERGE operaci: {e}")
-            capture_exception(e)
-            raise
+                self.bq_client.close()
+            except Exception as e:
+                logger.warning(f"[{self.name}] Chyba při zavírání BigQuery: {e}")
 
-    def sync_table(self, sql_file: str):
-        """
-        Synchronizuje jednu tabulku z SQL souboru s podporou full/incremental mode.
-        IGNORUJE metadata tabulku - řídí se pouze days_back z konfigurace.
-        
-        Args:
-            sql_file: Název SQL souboru
-        """
+    # --- pomocné -----------------------------------------------------------
+
+    def _table_id(self, table_name: str) -> str:
+        cfg = self.config["bigquery"]
+        return f"{cfg['project_id']}.{cfg['dataset']}.{table_name}"
+
+    def _load_sql_file(self, sql_file: str) -> str:
+        path = Path(sql_file)
+        if not path.exists():
+            raise FileNotFoundError(f"SQL soubor {sql_file} nenalezen")
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+
+    def _create_temp_table(self, temp_id: str, schema: List[bigquery.SchemaField]):
         try:
-            table_name = Path(sql_file).stem  # Název bez přípony
+            self.bq_client.delete_table(temp_id, not_found_ok=True)
+        except Exception:
+            pass
+        table = bigquery.Table(temp_id, schema=schema)
+        self.bq_client.create_table(table)
 
-            # Tabulky, které se vždy nahrávají celé (full refresh),
-            # i v incremental režimu - např. nemají sloupec ID pro MERGE.
-            full_refresh_tables = self.config['sync'].get('full_refresh_tables', [])
-            force_full_refresh = table_name in full_refresh_tables
+    def _stream_to_temp(self, cursor, columns, schema, temp_id, batch_size) -> int:
+        """Streamuje řádky z kurzoru po dávkách do temp tabulky."""
+        job_config = bigquery.LoadJobConfig(
+            write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+            schema=schema,
+            ignore_unknown_values=True,
+        )
+        total = 0
+        while True:
+            rows = cursor.fetchmany(batch_size)
+            if not rows:
+                break
+            df = pd.DataFrame.from_records(
+                [tuple(r) for r in rows], columns=columns
+            )
+            df = prepare_dataframe(df)
+            job = self.bq_client.load_table_from_dataframe(
+                df, temp_id, job_config=job_config
+            )
+            job.result()
+            total += len(df)
+            logger.info(f"[{self.name}]   nahráno do temp: {total} řádků")
+        return total
 
-            self.logger.info(f"\n{'='*60}")
-            self.logger.info(f"Synchronizace tabulky: {table_name} (mode: {self.sync_mode})")
-            self.logger.info(f"{'='*60}")
+    # --- jeden dotaz × jedna databáze -------------------------------------
 
-            if force_full_refresh:
-                self.logger.info(f"Tabulka {table_name} je v full_refresh_tables - vždy full load")
+    def sync_query(self, db: dict, query_cfg: dict, backfill: bool):
+        sql_file = query_cfg["file"]
+        table_name = Path(sql_file).stem
+        mode = query_cfg.get("mode", "incremental")
+        key = query_cfg.get("key", "ID")
 
-            # 1. Zjistíme pouze zda tabulka existuje (pro incremental mode)
-            sync_info = self.get_last_sync_info(table_name)
-            
-            if self.sync_mode == 'full':
-                self.logger.info(f"Full load - tabulka bude vyčištěna a nahrána data podle days_back")
-            elif self.sync_mode == 'incremental':
-                if sync_info and sync_info.get('exists'):
-                    self.logger.info(f"Incremental load - UPSERT podle ID, data podle days_back")
-                else:
-                    self.logger.info(f"Incremental load - tabulka neexistuje, vytvoří se nová")
-            
-            # 2. Načtení a úprava SQL (sync_info se používá jen pro kontrolu existence)
-            sql_query = self.load_and_prepare_sql(sql_file, sync_info)
-            
-            # 3. Stažení dat
-            batch_size = self.config['sync']['batch_size']
-            df = self.fetch_data_in_batches(sql_query, batch_size)
-            
-            # 4. Nahrání podle sync mode
-            if self.sync_mode == 'incremental' and sync_info and sync_info.get('exists') and not force_full_refresh:
-                # Incremental sync - MERGE (UPSERT podle ID)
-                self.upload_with_merge(df, table_name, batch_size)
-            else:
-                # Full sync - TRUNCATE a INSERT
-                # Nebo incremental když tabulka neexistuje
-                self.upload_to_bigquery(df, table_name, batch_size)
-            
-            # 5. Aktualizace metadata (volitelné, pro tracking)
-            if len(df) > 0:
-                # Bezpečné získání max datum
-                try:
-                    if 'Datum' in df.columns:
-                        # Odfiltruj NaN hodnoty a převeď na datum
-                        date_series = pd.to_datetime(df['Datum'], errors='coerce').dropna()
-                        if len(date_series) > 0:
-                            max_date = date_series.max().date()
-                        else:
-                            max_date = datetime.now().date()
-                    else:
-                        max_date = datetime.now().date()
-                except Exception as e:
-                    self.logger.warning(f"Chyba při zjišťování max_date: {e}, použiji current date")
-                    max_date = datetime.now().date()
-                    
-                self.update_sync_metadata(table_name, len(df), max_date)
-            
+        sync_cfg = self.config["sync"]
+        batch_size = sync_cfg.get("batch_size", 5000)
+        if backfill:
+            days_back = sync_cfg.get("backfill_days_back", 4000)
+        else:
+            days_back = query_cfg.get("days_back", sync_cfg.get("days_back", 7))
+
+        linked_server = db["linked_server"]
+        database = db["database"]
+
+        logger.info(
+            f"[{self.name}] {database} / {table_name} "
+            f"(mode={mode}, backfill={backfill}, days_back={days_back})"
+        )
+
+        sql = prepare_sql(self._load_sql_file(sql_file), linked_server, database, days_back)
+
+        target_id = self._table_id(table_name)
+        temp_id = f"{target_id}_temp_{int(datetime.now().timestamp())}"
+
+        cursor = self.mssql_conn.cursor()
+        try:
+            cursor.execute(sql)
+            columns = dedupe_columns([d[0] for d in cursor.description])
+            schema = build_bq_schema(columns)
+
+            self._create_temp_table(temp_id, schema)
+            total = self._stream_to_temp(cursor, columns, schema, temp_id, batch_size)
+            cursor.close()
+
+            statements = build_finalize_statements(
+                mode, backfill, target_id, temp_id, key, columns
+            )
+            for stmt in statements:
+                self.bq_client.query(stmt).result()
+
+            logger.info(
+                f"[{self.name}] ✓ {database} / {table_name}: {total} řádků "
+                f"({'append' if backfill and mode == 'full' else mode})"
+            )
         except Exception as e:
-            self.logger.error(f"Chyba při synchronizaci tabulky {sql_file}: {e}")
+            logger.error(f"[{self.name}] Chyba u {database}/{table_name}: {e}")
             capture_exception(e)
             raise
+        finally:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+            try:
+                self.bq_client.delete_table(temp_id, not_found_ok=True)
+            except Exception:
+                pass
 
-    def run(self):
-        """Hlavní metoda pro spuštění synchronizace."""
-        start_time = datetime.now()
-        
+    # --- běh bloku ---------------------------------------------------------
+
+    def run(self, backfill: bool = False, database: Optional[str] = None,
+            only: Optional[List[str]] = None) -> bool:
+        start = datetime.now()
+        logger.info("=" * 70)
+        logger.info(
+            f"[{self.name}] START (backfill={backfill}"
+            + (f", database={database}" if database else "")
+            + ")"
+        )
         try:
-            self.logger.info("="*70)
-            self.logger.info(f"START synchronizace Pohoda → BigQuery (mode: {self.sync_mode})")
-            self.logger.info("="*70)
-            
-            # 1. Připojení k databázím
             self.connect_mssql()
             self.connect_bigquery()
-            
-            # 2. Inicializace metadata tabulky (vždy)
-            self._ensure_sync_metadata_table()
-            
-            # 3. Získání connection info
-            self.get_pohoda_connection_info()
-            
-            # 4. Synchronizace všech tabulek
-            sql_files = self.config['sync']['sql_files']
-            
-            for sql_file in sql_files:
-                self.sync_table(sql_file)
-            
-            # Úspěch
-            duration = (datetime.now() - start_time).total_seconds()
-            self.logger.info("\n" + "="*70)
-            self.logger.info(f"✓ Synchronizace dokončena úspěšně za {duration:.1f} sekund")
-            self.logger.info("="*70)
-            
+
+            dbs = databases_to_process(self.config["databases"], backfill, database)
+            if not dbs:
+                logger.warning(f"[{self.name}] Žádná databáze ke zpracování (filter={database})")
+                return True
+
+            queries = self.config["sync"]["queries"]
+            if only:
+                queries = [q for q in queries if q["file"] in only]
+
+            for db in dbs:
+                for query_cfg in queries:
+                    self.sync_query(db, query_cfg, backfill)
+
+            dur = (datetime.now() - start).total_seconds()
+            logger.info(f"[{self.name}] ✓ Hotovo za {dur:.1f}s")
             return True
-            
         except Exception as e:
-            duration = (datetime.now() - start_time).total_seconds()
-            self.logger.error("\n" + "="*70)
-            self.logger.error(f"✗ Synchronizace selhala po {duration:.1f} sekundách")
-            self.logger.error(f"Chyba: {e}")
-            self.logger.error("="*70)
-            
+            dur = (datetime.now() - start).total_seconds()
+            logger.error(f"[{self.name}] ✗ Selhalo po {dur:.1f}s: {e}")
             capture_exception(e)
             return False
-            
         finally:
-            # Uzavření připojení
-            if self.mssql_conn:
-                try:
-                    self.mssql_conn.close()
-                    self.logger.info("MS SQL připojení uzavřeno")
-                except Exception as e:
-                    self.logger.warning(f"Chyba při uzavírání MS SQL: {e}")
-            
-            if self.bq_client:
-                try:
-                    self.bq_client.close()
-                    self.logger.info("BigQuery připojení uzavřeno")
-                except Exception as e:
-                    self.logger.warning(f"Chyba při uzavírání BigQuery: {e}")
+            self.close()
 
 
-def main():
-    """Hlavní funkce."""
-    try:
-        # Změna do složky se skriptem
-        script_dir = Path(__file__).parent
-        os.chdir(script_dir)
-        
-        # Spuštění synchronizace
-        syncer = PohodaBigQuerySync()
-        success = syncer.run()
-        
-        # Exit code pro cron
-        sys.exit(0 if success else 1)
-        
-    except KeyboardInterrupt:
-        print("\n\nSynchronizace přerušena uživatelem")
-        sys.exit(130)
-    except Exception as e:
-        print(f"\nKritická chyba: {e}")
-        capture_exception(e)
-        sys.exit(1)
+# ---------------------------------------------------------------------------
+# Orchestrace + CLI
+# ---------------------------------------------------------------------------
+
+def setup_logging(log_config: dict):
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    root = logging.getLogger()
+    root.setLevel(getattr(logging, log_config.get("log_level", "INFO")))
+
+    file_handler = RotatingFileHandler(
+        log_config.get("log_file", "sync.log"),
+        maxBytes=log_config.get("max_bytes", 10485760),
+        backupCount=log_config.get("backup_count", 5),
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+    root.addHandler(file_handler)
+
+    console = logging.StreamHandler(sys.stdout)
+    console.setFormatter(formatter)
+    root.addHandler(console)
+
+
+def setup_sentry(blocks: List[dict]):
+    for block in blocks:
+        sc = block.get("sentry", {})
+        dsn = sc.get("dsn")
+        if dsn and dsn != "your_sentry_dsn_here":
+            try:
+                sentry_sdk.init(
+                    dsn=dsn,
+                    environment=sc.get("environment", "production"),
+                    traces_sample_rate=sc.get("traces_sample_rate", 0.1),
+                )
+                logger.info("Sentry inicializováno")
+            except Exception as e:
+                logger.warning(f"Nepodařilo se inicializovat Sentry: {e}")
+            return
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Synchronizace Pohoda (MS SQL) -> BigQuery"
+    )
+    parser.add_argument("--config", default="config.json", help="Cesta ke configu")
+    parser.add_argument("--backfill", action="store_true",
+                        help="Spustit i historické databáze (current poslední)")
+    parser.add_argument("--database", help="Omezit na jednu konkrétní databázi")
+    parser.add_argument("--block", help="Omezit na jeden config blok podle 'name'")
+    parser.add_argument("--only", help="Omezit na vybrané SQL soubory (čárkou oddělené)")
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+
+    # Změna do složky se skriptem (kvůli relativním cestám ke configu/SQL)
+    os.chdir(Path(__file__).parent)
+
+    blocks = load_config(args.config)
+
+    if args.block:
+        blocks = [b for b in blocks if b.get("name") == args.block]
+        if not blocks:
+            print(f"CHYBA: Config blok '{args.block}' nenalezen.")
+            sys.exit(1)
+
+    setup_logging(blocks[0].get("logging", {}))
+    setup_sentry(blocks)
+
+    only = [s.strip() for s in args.only.split(",")] if args.only else None
+
+    all_ok = True
+    for block in blocks:
+        syncer = PohodaBigQuerySync(block)
+        ok = syncer.run(backfill=args.backfill, database=args.database, only=only)
+        all_ok = all_ok and ok
+
+    sys.exit(0 if all_ok else 1)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\nPřerušeno uživatelem")
+        sys.exit(130)
+    except Exception as exc:
+        print(f"\nKritická chyba: {exc}")
+        capture_exception(exc)
+        sys.exit(1)
