@@ -230,9 +230,16 @@ def build_finalize_statements(
         set_clause = ", ".join(f"T.`{c}` = S.`{c}`" for c in non_key)
         insert_cols = ", ".join(f"`{c}`" for c in columns)
         insert_vals = ", ".join(f"S.`{c}`" for c in columns)
+        # Zdroj musí mít klíč unikátní (jinak BigQuery MERGE selže s
+        # "must match at most one source row for each target row").
+        # Deduplikujeme - na klíč ponecháme jeden řádek.
+        dedup_source = (
+            f"(SELECT * FROM `{temp_id}` "
+            f"QUALIFY ROW_NUMBER() OVER (PARTITION BY `{key}` ORDER BY `{key}`) = 1)"
+        )
         merge = f"""
             MERGE `{target_id}` T
-            USING `{temp_id}` S
+            USING {dedup_source} S
             ON T.`{key}` = S.`{key}`
             WHEN MATCHED THEN UPDATE SET {set_clause}
             WHEN NOT MATCHED THEN INSERT ({insert_cols}) VALUES ({insert_vals})

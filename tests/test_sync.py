@@ -143,6 +143,8 @@ def test_finalize_incremental_merge():
     merge = stmts[1]
     assert "MERGE `p.d.FA` T" in merge
     assert "ON T.`ID` = S.`ID`" in merge
+    # zdroj je deduplikovaný na klíč (jinak BQ MERGE selže na duplicitních ID)
+    assert "QUALIFY ROW_NUMBER() OVER (PARTITION BY `ID`" in merge
     # key (ID) se v UPDATE SET NEobjeví, ostatní sloupce ano
     set_clause = merge.split("UPDATE SET")[1].split("WHEN NOT MATCHED")[0]
     assert "T.`Kc` = S.`Kc`" in set_clause
