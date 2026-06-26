@@ -292,8 +292,22 @@ class PohodaBigQuerySync:
             Tuple[linked_server, database]
         """
         try:
+            # Volitelný override z konfigurace - umožní zacílit na konkrétní
+            # POHODA databázi bez přepínání hodnoty v tabulce companies (picking DB).
+            # Použij např. pro jednorázový backfill historie jiné firmy.
+            override = self.config.get('pohoda_override') or {}
+            if override.get('linked_server') and override.get('database'):
+                self.linked_server = override['linked_server']
+                self.pohoda_database = override['database']
+                self.logger.info(
+                    f"Pohoda connection (OVERRIDE z config): "
+                    f"linked_server={self.linked_server}, "
+                    f"database={self.pohoda_database}"
+                )
+                return self.linked_server, self.pohoda_database
+
             query = "SELECT TOP 1 linked_server, [database] FROM companies"
-            
+
             cursor = self.mssql_conn.cursor()
             cursor.execute(query)
             row = cursor.fetchone()
