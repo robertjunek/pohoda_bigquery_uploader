@@ -9,7 +9,7 @@ SELECT
   , typ.Stext as typ
   , zna.SText as znacka
   , kat.SText as kategorie
-  , dru.SText as typ
+  , dru.SText as druh
   , bal.SText as velikost_baleni
   , skz.[VPrViditelnostBI] as viditelnost_bi
   , skz.VNakup
