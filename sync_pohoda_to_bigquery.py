@@ -45,7 +45,7 @@ PREFIX_TABLES = [
     "SKPP", "SKPPpol",
     "SKPV", "SKPVpol",
     "SKz",
-    "sStr", "sCin", "AD", "sZeme", "sSklad",
+    "sStr", "sCin", "AD", "sZeme", "sSklad", "sVPULpol",
     "sFormUh", "Kasa",
 ]
 
